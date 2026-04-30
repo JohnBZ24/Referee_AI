@@ -1,0 +1,8 @@
+buggs/
+.claude/
+
+# Windows-reserved filenames (can break git add on Windows)
+nul
+NUL
+**/nul
+**/NUL

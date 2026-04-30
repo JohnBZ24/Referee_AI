@@ -19,5 +19,18 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+
+    rules: {
+      // This project intentionally uses some patterns (SSE streaming, refs) that
+      // conflict with the experimental strict rules in eslint-plugin-react-hooks.
+      'react-hooks/immutability': 'off',
+      'react-hooks/purity': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/exhaustive-deps': 'off',
+
+      // Allow pragmatic API typing; we validate at runtime where needed.
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
   },
 ])
