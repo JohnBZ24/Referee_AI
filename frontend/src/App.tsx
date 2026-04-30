@@ -1,7 +1,652 @@
-export function App() {
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Menu } from 'lucide-react';
+import Sidebar from './components/Sidebar';
+import ModelSelector from './components/ModelSetSelector';
+import ModelPicker from './components/ModelPicker';
+import PromptDisplay from './components/PromptDisplay';
+import PanelGrid from './components/PanelGrid';
+import RefereeVerdict from './components/RefereeVerdict';
+import InputArea from './components/PromptInput';
+import { modelsAPI, sessionsAPI, promptAPI } from './lib/api';
+import type { Model, SSEEvent, Session, SessionRound } from './types';
+
+export default function App() {
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [currentSession, setCurrentSession] = useState<Session | null>(null);
+  const [models, setModels] = useState<Model[]>([]);
+
+  // Per-session UI state
+  const [sessionRounds, setSessionRounds] = useState<Record<string, SessionRound[]>>({});
+
+  const [inputValue, setInputValue] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+
+  // Track active streaming requests per session (survives re-renders)
+  const activeStreamsRef = useRef<Map<string, AbortController>>(new Map());
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [windowWidth, setWindowWidth] = useState(
+    typeof window !== 'undefined' ? window.innerWidth : 1280
+  );
+
+  useEffect(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const isMobile = windowWidth < 768;
+  const sidebarPx = sidebarCollapsed ? 70 : 280;
+  const contentLeft = isMobile ? 0 : sidebarPx;
+
+  useEffect(() => {
+    initializeApp().catch(err => {
+      console.error('App initialization failed:', err);
+      setLoading(false);
+    });
+  }, []);
+
+  async function initializeApp() {
+    try {
+      setLoading(true);
+      const [modelsData, sessionsData] = await Promise.all([
+        modelsAPI.list(),
+        sessionsAPI.list(),
+      ]);
+
+      setModels(modelsData);
+      
+      if (sessionsData.length > 0) {
+        setSessions(sessionsData.map((s, i) => ({ ...s, active: i === 0 })));
+        const activeSession = sessionsData[0];
+        setCurrentSession({ ...activeSession, active: true });
+        ensureSessionState(activeSession);
+        sessionsAPI.get(activeSession.id).then((full) => {
+          if (full.messages) {
+            hydrateFromMessages(full, full.messages);
+          }
+        }).catch(() => {});
+      } else {
+        await handleNewSession();
+      }
+    } catch (error) {
+      console.error('Failed to initialize app:', error);
+      // Show error UI but let the app continue
+      setModels([]); // Set empty models so UI can render
+      setSessions([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function ensureSessionState(session: Session) {
+    const sid = session.id;
+
+    setSessionRounds((prev) => (prev[sid] ? prev : { ...prev, [sid]: [] }));
+  }
+
+  function hydrateFromMessages(session: Session, messages: any[]) {
+    const sid = session.id;
+    const panelists = session.model_set?.panelists || [];
+
+    const sorted = [...messages].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+
+    // Group by round_id if present, otherwise by user-message boundaries.
+    const rounds: SessionRound[] = [];
+    const roundMap = new Map<string, SessionRound>();
+
+    function ensureRound(id: string, prompt: string): SessionRound {
+      const existing = roundMap.get(id);
+      if (existing) {
+        return existing;
+      }
+      const models: SessionRound['models'] = {};
+      for (const mid of panelists) {
+        models[mid] = { status: 'idle', content: '' };
+      }
+      const r: SessionRound = {
+        id,
+        prompt,
+        createdAt: Date.now(),
+        modelIds: panelists,
+        models,
+        verdictText: '',
+        verdictReady: false,
+      };
+      roundMap.set(id, r);
+      rounds.push(r);
+      return r;
+    }
+
+    let currentLegacyRoundId: string | null = null;
+    let currentLegacyPrompt = '';
+
+    for (const m of sorted) {
+      const rid = m.round_id ? String(m.round_id) : '';
+
+      if (!rid) {
+        // Legacy: create a new round on each user message.
+        if (m.role === 'user') {
+          currentLegacyRoundId = String(m.id);
+          currentLegacyPrompt = m.content || '';
+          ensureRound(currentLegacyRoundId, currentLegacyPrompt);
+          continue;
+        }
+
+        if (!currentLegacyRoundId) {
+          continue;
+        }
+
+        const r = ensureRound(currentLegacyRoundId, currentLegacyPrompt);
+        if (m.role === 'panelist' && m.model_name && r.models[m.model_name]) {
+          r.models[m.model_name] = {
+            ...r.models[m.model_name],
+            status: m.status === 'streaming' ? 'streaming' : 'complete',
+            content: m.content || '',
+            messageId: String(m.id),
+            tokens: m.tokens_used ?? undefined,
+          };
+        }
+
+        if (m.role === 'referee') {
+          r.verdictText = m.content || '';
+          r.verdictReady = true;
+        }
+
+        continue;
+      }
+
+      // round_id present: use it.
+      const r = ensureRound(rid, '');
+      if (m.role === 'user') {
+        r.prompt = m.content || '';
+      }
+      if (m.role === 'panelist' && m.model_name && r.models[m.model_name]) {
+        r.models[m.model_name] = {
+          ...r.models[m.model_name],
+          status: m.status === 'streaming' ? 'streaming' : 'complete',
+          content: m.content || '',
+          messageId: String(m.id),
+          tokens: m.tokens_used ?? undefined,
+        };
+      }
+      if (m.role === 'referee') {
+        r.verdictText = m.content || '';
+        r.verdictReady = true;
+      }
+    }
+
+    setSessionRounds((prev) => ({ ...prev, [sid]: rounds }));
+  }
+
+  function newId(): string {
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function handleNewSession() {
+    return sessionsAPI.create().then(newSession => {
+      setSessions(prev => [{ ...newSession, active: true }, ...prev.map((s) => ({ ...s, active: false }))]);
+      setCurrentSession({ ...newSession, active: true });
+      ensureSessionState(newSession);
+      setSidebarOpen(false);
+    });
+  }
+
+  function handleSelectSession(sessionId: string) {
+    setSessions((prev) => {
+      const selected = prev.find((s) => s.id === sessionId);
+      if (selected) {
+        setCurrentSession({ ...selected, active: true });
+        ensureSessionState(selected);
+
+        sessionsAPI.get(sessionId).then((full) => {
+          if (full.messages) {
+            hydrateFromMessages(full, full.messages);
+          }
+        }).catch(() => {});
+      } else {
+        sessionsAPI.get(sessionId)
+          .then((s) => {
+            setCurrentSession({ ...s, active: true });
+            ensureSessionState(s);
+            if (s.messages) {
+              hydrateFromMessages(s, s.messages);
+            }
+          })
+          .catch((e) => console.error('Failed to load session', e));
+      }
+
+      return prev.map((s) => ({ ...s, active: s.id === sessionId }));
+    });
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    try {
+      await sessionsAPI.delete(sessionId);
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+
+      setCurrentSession((prev) => {
+        if (!prev || prev.id !== sessionId) {
+          return prev;
+        }
+
+        const remaining = sessions.filter((s) => s.id !== sessionId);
+        const next = remaining[0] || null;
+        if (next) {
+          handleSelectSession(next.id);
+        } else {
+          // Create a fresh session if none remain.
+          handleNewSession();
+        }
+        return next;
+      });
+    } catch (e) {
+      console.error('Failed to delete session', e);
+    }
+  }
+
+  async function handleModelChange(panelists: string[], referee: string) {
+    if (!currentSession) return;
+    try {
+      const updated = await sessionsAPI.update(currentSession.id, {
+        model_set: { panelists },
+        referee_model: referee,
+      });
+      setCurrentSession({ ...updated, active: true });
+      setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, model_set: updated.model_set, referee_model: updated.referee_model } : s)));
+    } catch (e) {
+      console.error('Failed to update models:', e);
+      alert('Failed to update models. Please try again.');
+    }
+  }
+
+  function displayNameForModelId(modelId: string): string {
+    const model = models.find(m => m.id === modelId);
+    return model?.name || modelId;
+  }
+
+  async function handleSend(attachments: File[] = []) {
+    const prompt = inputValue.trim();
+
+    if (!prompt || !currentSession) {
+      console.error('Cannot send: missing prompt or session');
+      return;
+    }
+
+    if (!currentSession.id) {
+      console.error('Session ID is undefined');
+      alert('Error: Session not initialized. Please create a new session.');
+      return;
+    }
+
+    const sid = currentSession.id;
+    const panelists = currentSession.model_set?.panelists || [];
+
+    ensureSessionState(currentSession);
+
+    setInputValue('');
+
+    const roundId = newId();
+
+    const models: SessionRound['models'] = {};
+    for (const mid of panelists) {
+      models[mid] = { status: 'streaming', content: '' };
+    }
+
+    const round: SessionRound = {
+      id: roundId,
+      prompt,
+      createdAt: Date.now(),
+      modelIds: panelists,
+      models,
+      verdictText: '',
+      verdictReady: false,
+    };
+
+    setSessionRounds((prev) => ({
+      ...prev,
+      [sid]: [...(prev[sid] || []), round],
+    }));
+
+    // Cancel any existing stream for this session (shouldn't happen, but safety)
+    const existing = activeStreamsRef.current.get(sid);
+    if (existing) {
+      existing.abort();
+      activeStreamsRef.current.delete(sid);
+    }
+
+    const controller = new AbortController();
+    activeStreamsRef.current.set(sid, controller);
+
+    try {
+      await promptAPI.submit(
+        currentSession.id,
+        prompt,
+        (event: SSEEvent) => {
+          handleSSEEvent(event);
+        },
+        roundId,
+        controller.signal,
+        attachments
+      );
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        // ignore
+      } else {
+        console.error('Prompt submission failed:', error);
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const r = rounds[idx];
+          const nextModels = { ...r.models };
+          for (const mid of r.modelIds) {
+            const st = nextModels[mid];
+            nextModels[mid] = {
+              ...st,
+              status: 'complete',
+              content: st?.content || 'Error: Failed to get response',
+            };
+          }
+          rounds[idx] = { ...r, models: nextModels, verdictReady: true, verdictText: 'Error: prompt submission failed' };
+          return { ...prev, [sid]: rounds };
+        });
+      }
+    } finally {
+      activeStreamsRef.current.delete(sid);
+    }
+  }
+
+  const handleSSEEvent = useCallback((event: SSEEvent) => {
+    const sid = String(event.data?.session_id || '');
+    if (!sid) {
+      return;
+    }
+
+    // Always use round_id from event data (sent by backend) - never rely on stale React state
+    const roundId = String(event.data?.round_id || '');
+    if (!roundId) {
+      return;
+    }
+
+    switch (event.event) {
+      case 'panelist_chunk':
+        if (!roundId) {
+          break;
+        }
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+
+          const mid = event.data.model_name;
+          if (!mid) {
+            return prev;
+          }
+
+          const r = rounds[idx];
+          const state = r.models[mid];
+          if (!state) {
+            return prev;
+          }
+          if (state.status === 'complete') {
+            return prev;
+          }
+
+          const nextRound: SessionRound = {
+            ...r,
+            models: {
+              ...r.models,
+              [mid]: {
+                ...state,
+                status: 'streaming',
+                content: (state.content || '') + (event.data.content || ''),
+                messageId: String(event.data.message_id),
+              },
+            },
+          };
+
+          rounds[idx] = nextRound;
+          return { ...prev, [sid]: rounds };
+        });
+        break;
+
+      case 'panelist_complete':
+        if (!roundId) {
+          break;
+        }
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const mid = event.data.model_name;
+          if (!mid) {
+            return prev;
+          }
+          const r = rounds[idx];
+          const state = r.models[mid];
+          if (!state) {
+            return prev;
+          }
+          rounds[idx] = {
+            ...r,
+            models: {
+              ...r.models,
+              [mid]: {
+                ...state,
+                status: 'complete',
+                tokens: event.data.tokens,
+                messageId: String(event.data.message_id),
+              },
+            },
+          };
+          return { ...prev, [sid]: rounds };
+        });
+        break;
+
+      case 'panelist_error':
+        if (!roundId) {
+          break;
+        }
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const mid = event.data.model_name;
+          if (!mid) {
+            return prev;
+          }
+          const r = rounds[idx];
+          const state = r.models[mid];
+          if (!state) {
+            return prev;
+          }
+          const httpCode = event.data.http_code;
+          const err = event.data.error;
+          const msg = `Error: HTTP ${httpCode}${err ? ` - ${err}` : ''}`;
+          rounds[idx] = {
+            ...r,
+            models: {
+              ...r.models,
+              [mid]: {
+                ...state,
+                status: 'complete',
+                content: msg,
+                messageId: String(event.data.message_id),
+              },
+            },
+          };
+          return { ...prev, [sid]: rounds };
+        });
+        break;
+
+      case 'referee_chunk':
+        if (!roundId) {
+          break;
+        }
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const r = rounds[idx];
+          rounds[idx] = { ...r, verdictText: (r.verdictText || '') + (event.data.content || '') };
+          return { ...prev, [sid]: rounds };
+        });
+        break;
+
+      case 'referee_complete':
+        if (!roundId) {
+          break;
+        }
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const r = rounds[idx];
+          rounds[idx] = {
+            ...r,
+            verdictText: (event.data.winner ? event.data.winner + '\n\n' : '') + (event.data.summary || ''),
+            verdictReady: true,
+          };
+          return { ...prev, [sid]: rounds };
+        });
+        break;
+
+      case 'done':
+        // Refresh session title (backend auto-titles after first prompt).
+        if (event.data?.session_id) {
+          sessionsAPI.get(String(event.data.session_id)).then((updated) => {
+            setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, title: updated.title } : s)));
+            setCurrentSession((prev) => (prev && prev.id === updated.id ? { ...prev, title: updated.title } : prev));
+          }).catch(() => {});
+        }
+        break;
+    }
+  }, []); // Empty deps: handler only uses event data and functional state updates
+
+  const activeSessionId = currentSession?.id || '';
+  const rounds = activeSessionId ? (sessionRounds[activeSessionId] || []) : [];
+  const lastRound = rounds.length > 0 ? rounds[rounds.length - 1] : null;
+  const panelistIds = lastRound?.modelIds || (currentSession?.model_set?.panelists || []);
+  const isStreaming = !!lastRound && lastRound.modelIds.some((id) => lastRound.models[id]?.status === 'streaming');
+
+  // Determine which sessions are actively streaming (for sidebar indicator)
+  const streamingSessionIds = new Set<string>();
+  for (const [sid, roundsArr] of Object.entries(sessionRounds)) {
+    const hasStreaming = roundsArr.some(r => r.modelIds.some(mid => r.models[mid]?.status === 'streaming'));
+    if (hasStreaming || activeStreamsRef.current.has(sid)) {
+      streamingSessionIds.add(sid);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#FAFAF8] flex items-center justify-center">
+        <div className="text-[#888780]">Loading Referee AI...</div>
+      </div>
+    );
+  }
+
   return (
-    <>
-      <div></div>
-    </>
+    <div className="min-h-screen bg-[#FAFAF8] text-[#2C2C2A]">
+      {isMobile && sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/30"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <Sidebar
+        sessions={sessions}
+        streamingSessionIds={streamingSessionIds}
+        onNewSession={handleNewSession}
+        onSelectSession={handleSelectSession}
+        onDeleteSession={handleDeleteSession}
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(c => !c)}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+        isMobile={isMobile}
+      />
+
+      <div
+        className="min-h-screen pb-[100px] transition-[margin-left] duration-300"
+        style={{ marginLeft: contentLeft }}
+      >
+        {isMobile && (
+          <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-[#D3D1C8] bg-[#FAFAF8] px-4 py-3">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="text-[#888780] hover:text-[#2C2C2A]"
+            >
+              <Menu size={20} />
+            </button>
+            <span className="text-sm font-semibold text-[#2C2C2A]">Referee AI</span>
+          </div>
+        )}
+
+        <ModelSelector
+          models={panelistIds.map(displayNameForModelId)}
+          onChangeModels={() => setModelPickerOpen(true)}
+        />
+
+        <ModelPicker
+          isOpen={modelPickerOpen}
+          onClose={() => setModelPickerOpen(false)}
+          models={models}
+          currentPanelists={currentSession?.model_set?.panelists || []}
+          currentReferee={
+            currentSession?.referee_model ||
+            currentSession?.model_set?.panelists?.[0] ||
+            models[0]?.id ||
+            ''
+          }
+          onSave={handleModelChange}
+        />
+
+        <div className="p-5 pb-[200px]">
+          {rounds.map((r) => {
+            const complete = r.modelIds.length > 0 && r.modelIds.every((id) => r.models[id]?.status === 'complete');
+            return (
+              <div key={r.id} className="mb-8">
+                <PromptDisplay prompt={r.prompt} />
+                <div className="mt-6">
+                  <PanelGrid
+                    modelIds={r.modelIds}
+                    models={r.models}
+                    displayNameForModelId={displayNameForModelId}
+                  />
+                </div>
+                {(r.verdictReady || r.verdictText) && complete && (
+                  <RefereeVerdict verdict={r.verdictText || ''} isStreaming={!r.verdictReady} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <InputArea
+        value={inputValue}
+        onChange={setInputValue}
+        onSend={handleSend}
+        disabled={isStreaming}
+        leftOffset={contentLeft}
+      />
+    </div>
   );
 }

@@ -1,41 +1,43 @@
-// Displays a single AI model's name, streaming status, and response text.
-import React from "react";
-
-type Status = "idle" | "streaming" | "complete";
+import type { ModelStatus } from '../types';
+import { Streamdown } from 'streamdown';
 
 interface ModelPanelProps {
   modelName: string;
-  status: Status;
-  response: string;
+  status: ModelStatus;
+  content: string;
 }
 
-const statusConfig: Record<Status, { label: string; classes: string }> = {
-  idle: { label: "Idle", classes: "bg-gray-100 text-gray-500" },
-  streaming: { label: "Streaming", classes: "bg-orange-100 text-orange-600" },
-  complete: { label: "Complete", classes: "bg-green-100 text-green-600" },
+const STATUS: Record<ModelStatus, { dot: string; label: string; labelColor: string }> = {
+  idle:      { dot: 'bg-[#D3D1C8]',                       label: 'Idle',      labelColor: 'text-[#888780]' },
+  streaming: { dot: 'bg-[#D85A30] animate-pulse',          label: 'Streaming', labelColor: 'text-[#D85A30]' },
+  complete:  { dot: 'bg-[#2C2C2A]',                        label: 'Complete',  labelColor: 'text-[#2C2C2A]' },
 };
 
-export default function ModelPanel({ modelName, status, response }: ModelPanelProps) {
-  const { label, classes } = statusConfig[status];
+export default function ModelPanel({ modelName, status, content }: ModelPanelProps) {
+  const { dot, label, labelColor } = STATUS[status];
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 shadow-sm">
-      {/* Header row: model name + status badge */}
+    <div className="flex min-h-[300px] flex-col rounded-md border border-[#D3D1C8] bg-white p-4">
+      {/* Header */}
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-gray-800">{modelName}</h2>
-        <span className={`rounded-full px-3 py-0.5 text-sm font-medium ${classes}`}>
-          {label}
-        </span>
+        <h3 className="text-sm font-semibold text-[#2C2C2A]">{modelName}</h3>
+        <div className="flex items-center gap-1.5">
+          <span className={`h-[7px] w-[7px] flex-shrink-0 rounded-full ${dot}`} />
+          <span className={`text-[11px] font-medium ${labelColor}`}>{label}</span>
+        </div>
       </div>
 
-      {/* Response box */}
-      <div className="min-h-[6rem] rounded-xl border border-gray-200 bg-white p-4 text-sm leading-relaxed text-gray-700">
-        {response}
-        {/* Blinking cursor shown only while streaming */}
-        {status === "streaming" && (
-          <span className="ml-0.5 inline-block w-0.5 animate-pulse bg-orange-500 align-middle text-transparent">
-            |
-          </span>
+      {/* Response */}
+      <div className="flex-1 overflow-y-auto rounded-md bg-[#F9F8F6] p-3 text-sm leading-relaxed text-[#2C2C2A]">
+        {content ? (
+          <Streamdown animated isAnimating={status === 'streaming'}>
+            {content}
+          </Streamdown>
+        ) : (
+          <span className="text-[#888780]">Waiting for response…</span>
+        )}
+        {status === 'streaming' && (
+          <span className="ml-px inline-block h-[1em] w-0.5 animate-pulse bg-[#D85A30] align-text-bottom" />
         )}
       </div>
     </div>
