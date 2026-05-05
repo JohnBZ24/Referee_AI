@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MessageCircle, Plus, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
 import SessionItem from './SessionItem';
 import SearchModal from './SearchModal';
@@ -10,11 +10,20 @@ interface SidebarProps {
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, nextTitle: string) => void;
+  pinnedSessionIds: Set<string>;
+  onTogglePinSession: (sessionId: string) => void;
   collapsed: boolean;
   onToggle: () => void;
   open: boolean;
   onClose: () => void;
   isMobile: boolean;
+  desktopWidth: number;
+  minDesktopWidth: number;
+  maxDesktopWidth: number;
+  onChangeDesktopWidth: (px: number) => void;
+  onResizeStart?: () => void;
+  onResizeEnd?: () => void;
 }
 
 export default function Sidebar({
@@ -23,24 +32,131 @@ export default function Sidebar({
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  pinnedSessionIds,
+  onTogglePinSession,
   collapsed,
   onToggle,
   open,
   onClose,
   isMobile,
+  desktopWidth,
+  minDesktopWidth,
+  maxDesktopWidth,
+  onChangeDesktopWidth,
+  onResizeStart,
+  onResizeEnd,
 }: SidebarProps) {
   const [searchOpen, setSearchOpen] = useState(false);
 
+  const resizeStateRef = useRef<{
+    startX: number;
+    startWidth: number;
+    active: boolean;
+    raf: number | null;
+    nextWidth: number;
+    prevCursor: string;
+    prevUserSelect: string;
+  } | null>(null);
+
   const isCollapsed = !isMobile && collapsed;
+
+  function clampWidth(px: number): number {
+    return Math.max(minDesktopWidth, Math.min(maxDesktopWidth, px));
+  }
+
+  useEffect(() => {
+    return () => {
+      if (resizeStateRef.current?.raf) {
+        cancelAnimationFrame(resizeStateRef.current.raf);
+      }
+    };
+  }, []);
+
+  function endResize() {
+    const state = resizeStateRef.current;
+    if (!state) {
+      return;
+    }
+
+    state.active = false;
+    if (state.raf) {
+      cancelAnimationFrame(state.raf);
+    }
+
+    document.body.style.cursor = state.prevCursor;
+    document.body.style.userSelect = state.prevUserSelect;
+
+    resizeStateRef.current = null;
+    onResizeEnd?.();
+  }
+
+  function startResize(e: React.PointerEvent) {
+    if (isMobile || isCollapsed) {
+      return;
+    }
+
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    resizeStateRef.current = {
+      startX: e.clientX,
+      startWidth: desktopWidth,
+      active: true,
+      raf: null,
+      nextWidth: desktopWidth,
+      prevCursor,
+      prevUserSelect,
+    };
+
+    onResizeStart?.();
+
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onResizeMove(e: React.PointerEvent) {
+    const state = resizeStateRef.current;
+    if (!state?.active) {
+      return;
+    }
+
+    const delta = e.clientX - state.startX;
+    state.nextWidth = clampWidth(state.startWidth + delta);
+
+    if (state.raf) {
+      return;
+    }
+
+    state.raf = requestAnimationFrame(() => {
+      const s = resizeStateRef.current;
+      if (!s?.active) {
+        return;
+      }
+      onChangeDesktopWidth(s.nextWidth);
+      s.raf = null;
+    });
+  }
 
   return (
     <>
-      <SearchModal sessions={sessions} isOpen={searchOpen} onClose={() => setSearchOpen(false)} />
+      <SearchModal
+        sessions={sessions}
+        isOpen={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelectSession={(sessionId) => {
+          onSelectSession(sessionId);
+          if (isMobile) {
+            onClose();
+          }
+        }}
+      />
 
       <aside
-        className="fixed left-0 top-0 z-40 flex h-screen flex-col overflow-hidden border-r border-[#D3D1C8] bg-[#F0EEE8] transition-all duration-300 ease-in-out"
+        className="group fixed left-0 top-0 z-40 flex h-screen flex-col overflow-hidden border-r border-[#D3D1C8] bg-[#F0EEE8] transition-all duration-300 ease-in-out"
         style={{
-          width: isMobile ? 280 : collapsed ? 70 : 280,
+          width: isMobile ? 280 : collapsed ? 70 : desktopWidth,
           transform: isMobile && !open ? 'translateX(-100%)' : 'translateX(0)',
         }}
       >
@@ -50,12 +166,24 @@ export default function Sidebar({
             isCollapsed ? 'justify-center' : 'justify-between'
           }`}
         >
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (isMobile) {
+                onClose();
+                return;
+              }
+              onToggle();
+            }}
+            className="flex items-center gap-2 text-left"
+            aria-label={isMobile ? 'Close sidebar' : isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={isMobile ? 'Close sidebar' : isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
             <MessageCircle size={20} className="flex-shrink-0 text-[#2C2C2A]" />
             {!isCollapsed && (
               <span className="text-sm font-semibold text-[#2C2C2A]">Referee AI</span>
             )}
-          </div>
+          </button>
           {isMobile && (
             <button
               onClick={onClose}
@@ -123,10 +251,12 @@ export default function Sidebar({
             {sessions.map(s => (
               <SessionItem
                 key={s.id}
+                id={s.id}
                 title={s.title}
                 date={s.date}
                 active={s.active}
                 isStreaming={streamingSessionIds.has(s.id)}
+                pinned={pinnedSessionIds.has(s.id)}
                 collapsed={isCollapsed}
                 onSelect={() => {
                   onSelectSession(s.id);
@@ -135,6 +265,8 @@ export default function Sidebar({
                   }
                 }}
                 onDelete={() => onDeleteSession(s.id)}
+                onRename={(nextTitle) => onRenameSession(s.id, nextTitle)}
+                onTogglePin={() => onTogglePinSession(s.id)}
               />
             ))}
           </div>
@@ -160,6 +292,23 @@ export default function Sidebar({
                 </>
               )}
             </button>
+          </div>
+        )}
+
+        {/* ── Resize handle (desktop expanded only) ── */}
+        {!isMobile && !isCollapsed && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            className="absolute right-0 top-0 h-full w-[10px] cursor-col-resize touch-none"
+            onPointerDown={startResize}
+            onPointerMove={onResizeMove}
+            onPointerUp={endResize}
+            onPointerCancel={endResize}
+            onDoubleClick={() => onChangeDesktopWidth(280)}
+          >
+            <div className="absolute right-[4px] top-0 h-full w-px bg-[#D3D1C8] opacity-40 transition-opacity group-hover:opacity-100" />
           </div>
         )}
       </aside>

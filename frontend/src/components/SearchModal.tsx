@@ -9,9 +9,10 @@ interface SearchModalProps {
   sessions: Session[];
   isOpen: boolean;
   onClose: () => void;
+  onSelectSession: (sessionId: string) => void;
 }
 
-export default function SearchModal({ sessions, isOpen, onClose }: SearchModalProps) {
+export default function SearchModal({ sessions, isOpen, onClose, onSelectSession }: SearchModalProps) {
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -82,15 +83,15 @@ export default function SearchModal({ sessions, isOpen, onClose }: SearchModalPr
               No sessions match &ldquo;{query}&rdquo;
             </p>
           ) : (
-           results.map(session => (
-             <button
-               key={session.id}
-               onClick={() => {
-                 // TODO: wire up navigation
-                 onClose();
-               }}
-               className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-[#F5F3F0]"
-             >
+            results.map(session => (
+              <button
+                key={session.id}
+                onClick={() => {
+                  onSelectSession(session.id);
+                  onClose();
+                }}
+                className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-left transition-colors hover:bg-[#F5F3F0]"
+              >
                <MessageCircle size={16} className="shrink-0 text-[#888780]" />
                <span className="truncate text-sm text-[#2C2C2A]">{session.title}</span>
              </button>

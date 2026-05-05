@@ -60,6 +60,7 @@ export interface SessionRound {
   id: string;
   prompt: string;
   createdAt: number;
+  refs?: { sessionId: string; sessionTitle: string }[];
   modelIds: string[];
   models: Record<string, RoundModelState>;
   verdictText: string;

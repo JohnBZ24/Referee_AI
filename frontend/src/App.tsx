@@ -7,6 +7,7 @@ import PromptDisplay from './components/PromptDisplay';
 import PanelGrid from './components/PanelGrid';
 import RefereeVerdict from './components/RefereeVerdict';
 import InputArea from './components/PromptInput';
+import type { HiddenSessionMessageRef } from './components/PromptInput';
 import { modelsAPI, sessionsAPI, promptAPI } from './lib/api';
 import type { Model, SSEEvent, Session, SessionRound } from './types';
 
@@ -27,6 +28,39 @@ export default function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+
+  const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(() => {
+    if (typeof window === 'undefined') {
+      return new Set();
+    }
+    try {
+      const raw = window.localStorage.getItem('refereeai.pinnedSessions');
+      const ids = raw ? (JSON.parse(raw) as unknown) : [];
+      if (!Array.isArray(ids)) {
+        return new Set();
+      }
+      return new Set(ids.map((x) => String(x)).filter(Boolean));
+    } catch {
+      return new Set();
+    }
+  });
+
+  const SIDEBAR_MIN = 240;
+  const SIDEBAR_MAX = 460;
+  const SIDEBAR_DEFAULT = 280;
+
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === 'undefined') {
+      return SIDEBAR_DEFAULT;
+    }
+    const raw = window.localStorage.getItem('refereeai.sidebarWidth');
+    const n = raw ? Number(raw) : SIDEBAR_DEFAULT;
+    if (!Number.isFinite(n)) {
+      return SIDEBAR_DEFAULT;
+    }
+    return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(n)));
+  });
   const [windowWidth, setWindowWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 1280
   );
@@ -38,8 +72,22 @@ export default function App() {
   }, []);
 
   const isMobile = windowWidth < 768;
-  const sidebarPx = sidebarCollapsed ? 70 : 280;
+  const sidebarPx = sidebarCollapsed ? 70 : sidebarWidth;
   const contentLeft = isMobile ? 0 : sidebarPx;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem('refereeai.sidebarWidth', String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem('refereeai.pinnedSessions', JSON.stringify([...pinnedSessionIds]));
+  }, [pinnedSessionIds]);
 
   useEffect(() => {
     initializeApp().catch(err => {
@@ -267,7 +315,9 @@ export default function App() {
     return model?.name || modelId;
   }
 
-  async function handleSend(attachments: File[] = []) {
+  async function handleSend(payload: { attachments: File[]; refs: HiddenSessionMessageRef[] }) {
+    const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+    const refs = Array.isArray(payload.refs) ? payload.refs : [];
     const prompt = inputValue.trim();
 
     if (!prompt || !currentSession) {
@@ -299,6 +349,7 @@ export default function App() {
       id: roundId,
       prompt,
       createdAt: Date.now(),
+      refs: refs.map((r) => ({ sessionId: r.sessionId, sessionTitle: r.sessionTitle })),
       modelIds: panelists,
       models,
       verdictText: '',
@@ -329,7 +380,8 @@ export default function App() {
         },
         roundId,
         controller.signal,
-        attachments
+        attachments,
+        refs.map((r) => ({ session_id: String(r.sessionId || '') })).filter((r) => r.session_id)
       );
     } catch (error: any) {
       if (error.name === 'AbortError') {
@@ -359,6 +411,53 @@ export default function App() {
     } finally {
       activeStreamsRef.current.delete(sid);
     }
+  }
+
+  function handleCancelPrompt() {
+    if (!currentSession?.id) {
+      return;
+    }
+
+    const sid = currentSession.id;
+    const ctrl = activeStreamsRef.current.get(sid);
+    if (ctrl) {
+      ctrl.abort();
+      activeStreamsRef.current.delete(sid);
+    }
+
+    setSessionRounds((prev) => {
+      const roundsArr = [...(prev[sid] || [])];
+      if (roundsArr.length === 0) {
+        return prev;
+      }
+
+      const idx = roundsArr.length - 1;
+      const r = roundsArr[idx];
+
+      const nextModels = { ...r.models };
+      for (const mid of r.modelIds) {
+        const st = nextModels[mid];
+        if (!st) {
+          continue;
+        }
+        if (st.status === 'streaming') {
+          nextModels[mid] = {
+            ...st,
+            status: 'complete',
+            content: (st.content || '').trim() ? `${st.content}\n\n[Cancelled]` : '[Cancelled]',
+          };
+        }
+      }
+
+      roundsArr[idx] = {
+        ...r,
+        models: nextModels,
+        verdictReady: true,
+        verdictText: r.verdictText || '[Cancelled]',
+      };
+
+      return { ...prev, [sid]: roundsArr };
+    });
   }
 
   const handleSSEEvent = useCallback((event: SSEEvent) => {
@@ -471,9 +570,14 @@ export default function App() {
           if (!state) {
             return prev;
           }
-          const httpCode = event.data.http_code;
-          const err = event.data.error;
-          const msg = `Error: HTTP ${httpCode}${err ? ` - ${err}` : ''}`;
+          const msg =
+            typeof event.data.user_message === 'string' && event.data.user_message.trim() !== ''
+              ? event.data.user_message
+              : (() => {
+                  const httpCode = event.data.http_code;
+                  const err = event.data.error;
+                  return `Error: HTTP ${httpCode}${err ? ` - ${err}` : ''}`;
+                })();
           rounds[idx] = {
             ...r,
             models: {
@@ -527,12 +631,18 @@ export default function App() {
         break;
 
       case 'done':
-        // Refresh session title (backend auto-titles after first prompt).
+        // Reconcile final state from the DB (fixes missed SSE events).
         if (event.data?.session_id) {
-          sessionsAPI.get(String(event.data.session_id)).then((updated) => {
-            setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, title: updated.title } : s)));
-            setCurrentSession((prev) => (prev && prev.id === updated.id ? { ...prev, title: updated.title } : prev));
-          }).catch(() => {});
+          sessionsAPI
+            .get(String(event.data.session_id))
+            .then((updated) => {
+              setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, title: updated.title } : s)));
+              setCurrentSession((prev) => (prev && prev.id === updated.id ? { ...prev, title: updated.title } : prev));
+              if (updated.messages) {
+                hydrateFromMessages(updated, updated.messages as any[]);
+              }
+            })
+            .catch(() => {});
         }
         break;
     }
@@ -541,7 +651,7 @@ export default function App() {
   const activeSessionId = currentSession?.id || '';
   const rounds = activeSessionId ? (sessionRounds[activeSessionId] || []) : [];
   const lastRound = rounds.length > 0 ? rounds[rounds.length - 1] : null;
-  const panelistIds = lastRound?.modelIds || (currentSession?.model_set?.panelists || []);
+  const panelistIds = currentSession?.model_set?.panelists || [];
   const isStreaming = !!lastRound && lastRound.modelIds.some((id) => lastRound.models[id]?.status === 'streaming');
 
   // Determine which sessions are actively streaming (for sidebar indicator)
@@ -552,6 +662,20 @@ export default function App() {
       streamingSessionIds.add(sid);
     }
   }
+
+  const sortedSessions = (() => {
+    const pinned = pinnedSessionIds;
+    const list = [...sessions];
+    list.sort((a, b) => {
+      const ap = pinned.has(a.id) ? 1 : 0;
+      const bp = pinned.has(b.id) ? 1 : 0;
+      if (ap !== bp) {
+        return bp - ap;
+      }
+      return 0;
+    });
+    return list;
+  })();
 
   if (loading) {
     return (
@@ -571,31 +695,68 @@ export default function App() {
       )}
 
       <Sidebar
-        sessions={sessions}
+        sessions={sortedSessions}
         streamingSessionIds={streamingSessionIds}
         onNewSession={handleNewSession}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
+        onRenameSession={(sessionId, nextTitle) => {
+          sessionsAPI
+            .update(sessionId, { title: nextTitle })
+            .then((updated) => {
+              setSessions((prev) => prev.map((s) => (s.id === updated.id ? { ...s, title: updated.title } : s)));
+              setCurrentSession((prev) => (prev && prev.id === updated.id ? { ...prev, title: updated.title } : prev));
+            })
+            .catch((e) => {
+              console.error('Failed to rename session', e);
+              alert('Failed to rename session. Please try again.');
+            });
+        }}
+        pinnedSessionIds={pinnedSessionIds}
+        onTogglePinSession={(sessionId) => {
+          setPinnedSessionIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(sessionId)) {
+              next.delete(sessionId);
+            } else {
+              next.add(sessionId);
+            }
+            return next;
+          });
+        }}
         collapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(c => !c)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         isMobile={isMobile}
+        desktopWidth={sidebarWidth}
+        minDesktopWidth={SIDEBAR_MIN}
+        maxDesktopWidth={SIDEBAR_MAX}
+        onChangeDesktopWidth={(px) => setSidebarWidth(Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Math.round(px))))}
+        onResizeStart={() => setSidebarResizing(true)}
+        onResizeEnd={() => setSidebarResizing(false)}
       />
 
       <div
-        className="min-h-screen pb-[100px] transition-[margin-left] duration-300"
+        className={`min-h-screen pb-[100px] ${sidebarResizing ? '' : 'transition-[margin-left] duration-300'}`}
         style={{ marginLeft: contentLeft }}
       >
         {isMobile && (
-          <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-[#D3D1C8] bg-[#FAFAF8] px-4 py-3">
+         <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-[#D3D1C8] bg-[#FAFAF8] px-4 py-3">
             <button
               onClick={() => setSidebarOpen(true)}
               className="text-[#888780] hover:text-[#2C2C2A]"
             >
               <Menu size={20} />
             </button>
-            <span className="text-sm font-semibold text-[#2C2C2A]">Referee AI</span>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              className="text-sm font-semibold text-[#2C2C2A]"
+              aria-label="Open sidebar"
+            >
+              Referee AI
+            </button>
           </div>
         )}
 
@@ -623,7 +784,7 @@ export default function App() {
             const complete = r.modelIds.length > 0 && r.modelIds.every((id) => r.models[id]?.status === 'complete');
             return (
               <div key={r.id} className="mb-8">
-                <PromptDisplay prompt={r.prompt} />
+                <PromptDisplay prompt={r.prompt} refs={r.refs} />
                 <div className="mt-6">
                   <PanelGrid
                     modelIds={r.modelIds}
@@ -644,8 +805,13 @@ export default function App() {
         value={inputValue}
         onChange={setInputValue}
         onSend={handleSend}
+        onCancel={handleCancelPrompt}
         disabled={isStreaming}
+        isStreaming={isStreaming}
         leftOffset={contentLeft}
+        disableTransition={sidebarResizing}
+        sessions={sessions.map((s) => ({ id: s.id, title: s.title }))}
+        currentSessionId={currentSession?.id}
       />
     </div>
   );

@@ -8,6 +8,7 @@ use App\Models\AiSession;
 use App\Models\Message;
 use App\Services\AI\AIService;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -15,11 +16,14 @@ class PromptController extends Controller
 {
     private const int INLINE_TEXT_ATTACHMENT_MAX_BYTES = 204800; // 200KB
 
+    private const int MAX_HIDDEN_REFS = 3;
+
     public function __construct(private readonly AIService $aiService) {}
 
     public function submit(SubmitPromptRequest $request, AiSession $session): StreamedResponse
     {
         return new StreamedResponse(function () use ($request, $session): void {
+            $requestId = (string) Str::uuid();
             try {
                 // Streaming responses can legitimately exceed PHP's default execution time.
                 // Ensure long-running SSE requests don't fatal mid-stream.
@@ -30,6 +34,10 @@ class PromptController extends Controller
                 $this->disableBuffering();
 
                 $prompt = $request->input('prompt');
+                $hiddenContext = $this->buildHiddenContext($request);
+                $effectivePrompt = $hiddenContext !== ''
+                    ? $hiddenContext."\n\nUser prompt:\n".(string) $prompt
+                    : (string) $prompt;
                 $roundId = $request->input('round_id');
                 if (! is_string($roundId) || trim($roundId) === '') {
                     $roundId = (string) Str::uuid();
@@ -44,7 +52,7 @@ class PromptController extends Controller
                 $contentParts = null;
                 $plugins = null;
                 if ($hasAttachments) {
-                    [$contentParts, $plugins] = $this->buildOpenRouterContentParts($prompt, $attachments);
+                    [$contentParts, $plugins] = $this->buildOpenRouterContentParts($effectivePrompt, $attachments);
                 }
 
                 // Persist user message
@@ -112,16 +120,29 @@ class PromptController extends Controller
                                 'tokens' => $tokens,
                             ]);
                         },
-                        function (int $index, int $httpCode, string $error) use ($panelistMessages, &$panelistResponses, $roundId): void {
-                            $content = "[Error] HTTP {$httpCode}".($error !== '' ? ": {$error}" : '');
+                        function (int $index, int $httpCode, string $error) use ($panelistMessages, &$panelistResponses, $roundId, $requestId): void {
+                            $model = (string) ($panelistMessages[$index]->model_name ?? '');
+                            Log::warning('panelist_error', [
+                                'request_id' => $requestId,
+                                'session_id' => $panelistMessages[$index]->session_id,
+                                'round_id' => $roundId,
+                                'message_id' => $panelistMessages[$index]->id,
+                                'model_name' => $model,
+                                'http_code' => $httpCode,
+                                'error' => $error,
+                            ]);
+
+                            $public = $httpCode === 429
+                                ? "That model is rate-limited right now. Try again in a moment. (id: {$requestId})"
+                                : "That model failed to respond. Please try again. (id: {$requestId})";
 
                             $panelistMessages[$index]->update([
-                                'content' => $content,
+                                'content' => $public,
                                 'status' => 'complete',
                                 'tokens_used' => null,
                             ]);
 
-                            $panelistResponses[$index] = $content;
+                            $panelistResponses[$index] = $public;
 
                             $this->sseEmit('panelist_error', [
                                 'session_id' => $panelistMessages[$index]->session_id,
@@ -129,14 +150,14 @@ class PromptController extends Controller
                                 'message_id' => $panelistMessages[$index]->id,
                                 'position' => $index + 1,
                                 'model_name' => $panelistMessages[$index]->model_name,
-                                'http_code' => $httpCode,
-                                'error' => $error,
+                                'request_id' => $requestId,
+                                'user_message' => $public,
                             ]);
                         },
                     )
                     : $this->aiService->streamParallel(
                         $panelists,
-                        $prompt,
+                        $effectivePrompt,
                         function (int $index, string $chunk) use ($panelistMessages, &$panelistResponses, $roundId): void {
                             $panelistResponses[$index] .= $chunk;
 
@@ -168,16 +189,29 @@ class PromptController extends Controller
                                 'tokens' => $tokens,
                             ]);
                         },
-                        function (int $index, int $httpCode, string $error) use ($panelistMessages, &$panelistResponses, $roundId): void {
-                            $content = "[Error] HTTP {$httpCode}".($error !== '' ? ": {$error}" : '');
+                        function (int $index, int $httpCode, string $error) use ($panelistMessages, &$panelistResponses, $roundId, $requestId): void {
+                            $model = (string) ($panelistMessages[$index]->model_name ?? '');
+                            Log::warning('panelist_error', [
+                                'request_id' => $requestId,
+                                'session_id' => $panelistMessages[$index]->session_id,
+                                'round_id' => $roundId,
+                                'message_id' => $panelistMessages[$index]->id,
+                                'model_name' => $model,
+                                'http_code' => $httpCode,
+                                'error' => $error,
+                            ]);
+
+                            $public = $httpCode === 429
+                                ? "That model is rate-limited right now. Try again in a moment. (id: {$requestId})"
+                                : "That model failed to respond. Please try again. (id: {$requestId})";
 
                             $panelistMessages[$index]->update([
-                                'content' => $content,
+                                'content' => $public,
                                 'status' => 'complete',
                                 'tokens_used' => null,
                             ]);
 
-                            $panelistResponses[$index] = $content;
+                            $panelistResponses[$index] = $public;
 
                             $this->sseEmit('panelist_error', [
                                 'session_id' => $panelistMessages[$index]->session_id,
@@ -185,8 +219,8 @@ class PromptController extends Controller
                                 'message_id' => $panelistMessages[$index]->id,
                                 'position' => $index + 1,
                                 'model_name' => $panelistMessages[$index]->model_name,
-                                'http_code' => $httpCode,
-                                'error' => $error,
+                                'request_id' => $requestId,
+                                'user_message' => $public,
                             ]);
                         },
                     );
@@ -203,9 +237,12 @@ class PromptController extends Controller
                     'status' => 'streaming',
                 ]);
 
-                $this->sseEmit('referee_start', ['session_id' => $session->id, 'round_id' => $roundId, 'message_id' => $refereeMessage->id]);
+                $this->sseEmit('referee_start', ['session_id' => $session->id, 'round_id' => $roundId, 'message_id' => $refereeMessage->id, 'request_id' => $requestId]);
 
                 $refereePrompt = $this->buildRefereePrompt($prompt, $panelists, $fullResponses);
+                if ($hiddenContext !== '') {
+                    $refereePrompt = $hiddenContext."\n\n".$refereePrompt;
+                }
 
                 try {
                     $refereeResponse = $hasAttachments
@@ -241,7 +278,16 @@ class PromptController extends Controller
                             },
                         );
                 } catch (\Throwable $e) {
-                    $content = '[Error] '.$e->getMessage();
+                    Log::error('referee_error', [
+                        'request_id' => $requestId,
+                        'session_id' => $refereeMessage->session_id,
+                        'round_id' => $roundId,
+                        'message_id' => $refereeMessage->id,
+                        'error' => $e->getMessage(),
+                        'exception' => get_class($e),
+                    ]);
+
+                    $content = "Referee failed to respond. Please try again. (id: {$requestId})";
 
                     $refereeMessage->update([
                         'content' => $content,
@@ -254,9 +300,10 @@ class PromptController extends Controller
                         'message_id' => $refereeMessage->id,
                         'winner' => null,
                         'summary' => $content,
+                        'request_id' => $requestId,
                     ]);
 
-                    $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $roundId]);
+                    $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $roundId, 'request_id' => $requestId]);
 
                     return;
                 }
@@ -274,6 +321,7 @@ class PromptController extends Controller
                     'message_id' => $refereeMessage->id,
                     'winner' => $winner,
                     'summary' => $summary,
+                    'request_id' => $requestId,
                 ]);
 
                 // Auto-title the session from the first user prompt
@@ -283,7 +331,7 @@ class PromptController extends Controller
                     ]);
                 }
 
-                $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $roundId]);
+                $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $roundId, 'request_id' => $requestId]);
             } catch (\Throwable $e) {
                 // Never let exceptions bubble after output has begun (it breaks SSE).
                 $this->disableBuffering();
@@ -291,14 +339,22 @@ class PromptController extends Controller
                 if (! is_string($fallbackRoundId) || trim($fallbackRoundId) === '') {
                     $fallbackRoundId = (string) Str::uuid();
                 }
+                Log::error('prompt_stream_fatal', [
+                    'request_id' => $requestId,
+                    'session_id' => $session->id,
+                    'round_id' => $fallbackRoundId,
+                    'error' => $e->getMessage(),
+                    'exception' => get_class($e),
+                ]);
                 $this->sseEmit('referee_complete', [
                     'session_id' => $session->id,
                     'round_id' => $fallbackRoundId,
                     'message_id' => null,
                     'winner' => null,
-                    'summary' => '[Error] '.$e->getMessage(),
+                    'summary' => "Something went wrong. Please try again. (id: {$requestId})",
+                    'request_id' => $requestId,
                 ]);
-                $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $fallbackRoundId]);
+                $this->sseEmit('done', ['session_id' => $session->id, 'round_id' => $fallbackRoundId, 'request_id' => $requestId]);
             }
         }, 200, [
             'Content-Type' => 'text/event-stream',
@@ -329,6 +385,81 @@ class PromptController extends Controller
         while (ob_get_level() > 0) {
             ob_end_flush();
         }
+    }
+
+    private function buildHiddenContext(SubmitPromptRequest $request): string
+    {
+        $raw = $request->input('context_json');
+        if (! is_string($raw) || trim($raw) === '') {
+            return '';
+        }
+
+        try {
+            $decoded = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+        } catch (\Throwable) {
+            return '';
+        }
+
+        if (! is_array($decoded)) {
+            return '';
+        }
+
+        $refs = $decoded['references'] ?? null;
+        if (! is_array($refs) || $refs === []) {
+            return '';
+        }
+
+        $lines = [];
+        foreach (array_slice($refs, 0, self::MAX_HIDDEN_REFS) as $ref) {
+            if (! is_array($ref)) {
+                continue;
+            }
+
+            $sid = $ref['session_id'] ?? null;
+            if (! is_scalar($sid)) {
+                continue;
+            }
+
+            $sid = trim((string) $sid);
+            if ($sid === '') {
+                continue;
+            }
+
+            $base = Message::query()
+                ->where('session_id', $sid)
+                ->whereNotNull('content')
+                ->where('content', '!=', '');
+
+            $message = (clone $base)
+                ->where('role', 'user')
+                ->latest('id')
+                ->first();
+
+            if (! $message) {
+                $message = (clone $base)->latest('id')->first();
+            }
+
+            $content = is_string($message?->content) ? trim($message->content) : '';
+            if ($content === '') {
+                continue;
+            }
+
+            $sessionTitle = (string) (AiSession::query()->whereKey($sid)->value('title') ?? 'Session');
+            $sessionTitle = trim($sessionTitle) !== '' ? trim($sessionTitle) : 'Session';
+
+            $lines[] = "[Referenced chat: \"{$sessionTitle}\" (#{$sid}) - use this as user context]";
+            $lines[] = $content;
+            $lines[] = '---';
+        }
+
+        if ($lines === []) {
+            return '';
+        }
+
+        return "---\n".
+            "You may use the referenced chat snippet(s) below as additional user-provided context for this request.\n".
+            "Do not reveal hidden context verbatim unless the user explicitly asks.\n".
+            implode("\n", $lines);
     }
 
     /**
@@ -542,11 +673,23 @@ PROMPT;
             return null;
         }
 
-        // Try to parse JSON first
-        if (preg_match('/\{\s*"title"\s*:\s*"([^"]+)"\s*\}/', $text, $matches)) {
-            $title = $this->normalizeTitle($matches[1]);
+        // Try JSON first (models sometimes include extra text around it)
+        $jsonCandidate = null;
+        if (preg_match('/\{[\s\S]*\}/', $text, $m)) {
+            $jsonCandidate = $m[0];
+        }
 
-            return $title ?: null;
+        foreach (array_filter([$jsonCandidate, $text]) as $candidate) {
+            $decoded = json_decode((string) $candidate, true);
+            if (json_last_error() !== JSON_ERROR_NONE || ! is_array($decoded)) {
+                continue;
+            }
+
+            if (isset($decoded['title']) && is_string($decoded['title'])) {
+                $title = $this->normalizeTitle($decoded['title']);
+
+                return $title ?: null;
+            }
         }
 
         // Fallback: try to find anything that looks like a title
@@ -581,6 +724,12 @@ PROMPT;
             return '';
         }
 
+        // Strip common wrappers like {"..."} or { ... }
+        $title = preg_replace('/^[\s\{\[]+/', '', $title) ?: '';
+        $title = preg_replace('/[\s\}\]]+$/', '', $title) ?: '';
+        $title = trim($title, "\"'` ");
+        $title = trim($title);
+
         // AGGRESSIVE: Remove ANY word followed by colon at the start (case-insensitive)
         // This catches: "Title:", "TITLE:", "Session Title:", "AI says:", etc.
         while (preg_match('/^[^a-zA-Z0-9]*[a-zA-Z]+\s*:\s*/i', $title)) {
@@ -600,6 +749,10 @@ PROMPT;
 
         // Remove trailing punctuation
         $title = rtrim($title, '. ,;:!?-–—');
+        $title = trim($title);
+
+        // Remove stray braces/quotes that sometimes leak through
+        $title = str_replace(['{', '}', '"'], '', $title);
         $title = trim($title);
 
         // Remove disallowed words

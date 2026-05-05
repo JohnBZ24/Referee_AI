@@ -9,10 +9,39 @@ export interface Model {
 }
 
 // Transform Laravel API format to frontend format
+function cleanSessionTitle(title: any): string {
+  if (typeof title !== 'string') {
+    return 'New Session';
+  }
+
+  let t = title.trim();
+  if (!t) {
+    return 'New Session';
+  }
+
+  // Handle accidental JSON-ish titles like {"title":"..."}
+  if (t.startsWith('{') && t.includes('"title"')) {
+    try {
+      const obj = JSON.parse(t);
+      if (obj && typeof obj.title === 'string') {
+        t = obj.title.trim();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Strip common wrappers
+  t = t.replace(/^[\s[{]+/, '').replace(/[\s}\]]+$/, '').trim();
+  t = t.replace(/^["'`]+|["'`]+$/g, '').trim();
+
+  return t || 'New Session';
+}
+
 function transformSession(apiSession: any): Session {
   return {
     id: String(apiSession.id || ''),
-    title: apiSession.title || 'New Session',
+    title: cleanSessionTitle(apiSession.title),
     date: apiSession.created_at ? new Date(apiSession.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Apr 23',
     active: false, // Will be set by the app logic
 
@@ -102,11 +131,25 @@ export interface PromptResponse {
   data: any;
 }
 
+export type HiddenContextRef = {
+  session_id: string;
+};
+
 export const promptAPI = {
-    async submit(sessionId: string, prompt: string, onEvent: (event: PromptResponse) => void, roundId?: string, signal?: AbortSignal, attachments?: File[]): Promise<void> {
+  async submit(
+    sessionId: string,
+    prompt: string,
+    onEvent: (event: PromptResponse) => void,
+    roundId?: string,
+    signal?: AbortSignal,
+    attachments?: File[],
+    refs?: HiddenContextRef[],
+  ): Promise<void> {
     const url = `${apiClient.defaults.baseURL}/sessions/${sessionId}/prompt`;
 
     const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    const refsPayload = Array.isArray(refs) && refs.length > 0 ? { references: refs.slice(0, 3) } : null;
+
     const body = hasAttachments
       ? (() => {
           const fd = new FormData();
@@ -114,12 +157,19 @@ export const promptAPI = {
           if (roundId) {
             fd.append('round_id', roundId);
           }
+          if (refsPayload) {
+            fd.append('context_json', JSON.stringify(refsPayload));
+          }
           for (const f of attachments.slice(0, 3)) {
             fd.append('attachments[]', f);
           }
           return fd;
         })()
-      : JSON.stringify({ prompt, round_id: roundId });
+      : JSON.stringify({
+          prompt,
+          round_id: roundId,
+          context_json: refsPayload ? JSON.stringify(refsPayload) : undefined,
+        });
 
     const response = await fetch(url, {
       method: 'POST',
@@ -142,6 +192,37 @@ export const promptAPI = {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    function parseSseBlock(block: string): { event: string; data: any } | null {
+      const norm = block.replace(/\r\n/g, '\n').trim();
+      if (!norm) return null;
+
+      const lines = norm.split('\n');
+      let event: string | undefined;
+      const dataLines: string[] = [];
+
+      for (const l of lines) {
+        if (l.startsWith(':')) continue; // comment/keepalive
+        if (l.startsWith('event:')) {
+          event = l.slice('event:'.length).trim();
+          continue;
+        }
+        if (l.startsWith('data:')) {
+          dataLines.push(l.slice('data:'.length).trim());
+        }
+      }
+
+      if (!event || dataLines.length === 0) {
+        return null;
+      }
+
+      const dataText = dataLines.join('\n');
+      try {
+        return { event, data: JSON.parse(dataText) };
+      } catch {
+        return null;
+      }
+    }
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -150,21 +231,23 @@ export const promptAPI = {
         buffer += decoder.decode(value, { stream: true });
 
         // Support both LF and CRLF SSE separators
-        const lines = buffer.split(/\r?\n\r?\n/);
-        buffer = lines.pop() || '';
+        const blocks = buffer.split(/\r?\n\r?\n/);
+        buffer = blocks.pop() || '';
 
-        for (const line of lines) {
-          const norm = line.replace(/\r\n/g, '\n');
-          if (norm.startsWith('event: ')) {
-            const event = norm.substring(7).split('\n')[0];
-            const dataLine = norm.split('\n').find(l => l.startsWith('data: '));
-            if (dataLine) {
-              const data = JSON.parse(dataLine.substring(6));
-              const validEvents = ['panelist_chunk', 'panelist_complete', 'panelist_error', 'referee_start', 'referee_chunk', 'referee_complete', 'done'];
-              if (validEvents.includes(event)) {
-                onEvent({ event: event as any, data });
-              }
-            }
+        for (const block of blocks) {
+          const parsed = parseSseBlock(block);
+          if (!parsed) continue;
+          const validEvents = [
+            'panelist_chunk',
+            'panelist_complete',
+            'panelist_error',
+            'referee_start',
+            'referee_chunk',
+            'referee_complete',
+            'done',
+          ];
+          if (validEvents.includes(parsed.event)) {
+            onEvent({ event: parsed.event as any, data: parsed.data });
           }
         }
       }

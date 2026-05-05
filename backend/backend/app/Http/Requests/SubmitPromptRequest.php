@@ -18,6 +18,7 @@ class SubmitPromptRequest extends FormRequest
         return [
             'prompt' => ['required', 'string', 'min:1', 'max:10000'],
             'round_id' => ['nullable', 'string', 'max:64'],
+            'context_json' => ['nullable', 'string', 'max:20000'],
             'attachments' => ['nullable', 'array', 'max:3'],
             'attachments.*' => [
                 'file',
