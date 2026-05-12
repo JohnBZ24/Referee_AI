@@ -678,13 +678,13 @@ class PromptController extends Controller
     private function buildRefereePrompt(string $userPrompt, array $panelists, array $responses): string
     {
         $modelNames = array_map(
-            fn (string $slug) => config("referee_ai.models.{$slug}.name", $slug),
+            fn (string $id) => $this->aiService->labelFor($id),
             $panelists,
         );
 
         $parts = ["You are an expert evaluator comparing AI responses.\n\nOriginal user question:\n{$userPrompt}"];
 
-        foreach ($panelists as $i => $slug) {
+        foreach ($panelists as $i => $id) {
             $name = $modelNames[$i];
             $response = $responses[$i] ?? '(no response)';
             $parts[] = "Response from {$name}:\n{$response}";
@@ -713,10 +713,10 @@ INSTRUCTIONS;
             $declared = trim($matches[1]);
 
             // Try to match against a known model name
-            foreach ($panelists as $slug) {
-                $name = config("referee_ai.models.{$slug}.name", $slug);
-                if (stripos($declared, $name) !== false || stripos($declared, $slug) !== false) {
-                    $winner = $slug;
+            foreach ($panelists as $id) {
+                $name = $this->aiService->labelFor($id);
+                if (stripos($declared, $name) !== false || stripos($declared, $id) !== false) {
+                    $winner = $id;
                     break;
                 }
             }

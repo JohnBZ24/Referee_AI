@@ -2,22 +2,24 @@
 
 return [
     'models' => [
-        'kimi-1' => [
+        // Default slots driven entirely by env model IDs.
+        // Keys are internal only; the API returns model_id as the public identifier.
+        'panelist_1' => [
             'name' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
             'model_id' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
         ],
-        'kimi-2' => [
+        'panelist_2' => [
             'name' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
             'model_id' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
         ],
-        'kimi-3' => [
+        'panelist_3' => [
             'name' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
             'model_id' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
         ],
-        'kimi-4' => [
+        'referee' => [
             'name' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free').' (ref)',
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
             'model_id' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free'),
@@ -61,8 +63,13 @@ return [
         ],
     ],
 
-    'default_panelists' => ['kimi-1', 'kimi-2', 'kimi-3'],
-    'default_referee' => 'kimi-4',
+    // Defaults stored on sessions as model_id values (not internal keys).
+    'default_panelists' => [
+        env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
+        env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
+        env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
+    ],
+    'default_referee' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free'),
 
     'title_model' => env('AI_TITLE_MODEL', null),
 

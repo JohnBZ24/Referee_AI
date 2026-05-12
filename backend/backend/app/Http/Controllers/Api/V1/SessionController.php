@@ -25,12 +25,29 @@ class SessionController extends Controller
 
     public function store(CreateSessionRequest $request): AiSessionResource
     {
+        $defaultPanelists = (array) config('referee_ai.default_panelists', []);
+        $defaultReferee = (string) config('referee_ai.default_referee', '');
+
+        $panelists = $request->input('model_set.panelists', $defaultPanelists);
+        if (! is_array($panelists) || $panelists === []) {
+            $panelists = $defaultPanelists;
+        }
+
+        $referee = $request->input('referee_model');
+        if (! is_string($referee) || trim($referee) === '') {
+            $referee = $request->input('model_set.referee', $defaultReferee);
+        }
+        $referee = is_string($referee) ? trim($referee) : '';
+        if ($referee === '') {
+            $referee = $defaultReferee;
+        }
+
         $session = AiSession::create([
             'title' => $request->input('title', 'New Session'),
-            'model_set' => $request->input('model_set', [
-                'panelists' => config('ai.default_panelists'),
-            ]),
-            'referee_model' => $request->input('model_set.referee', config('ai.default_referee')),
+            'model_set' => [
+                'panelists' => $panelists,
+            ],
+            'referee_model' => $referee,
         ]);
 
         return new AiSessionResource($session->load('messages'));

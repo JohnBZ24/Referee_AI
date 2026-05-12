@@ -17,27 +17,70 @@ use function Laravel\Ai\agent;
 class AIService
 {
     /**
-     * @return array<int, array{id: string, name: string, provider: string, model_id: string}>
+     * @return array<int, array{key: string, name: string, provider: string, model_id: string}>
      */
-    public function listModels(): array
+    private function configuredModels(): array
     {
         $models = (array) config('referee_ai.models', []);
 
         $out = [];
-        foreach ($models as $slug => $cfg) {
+        foreach ($models as $key => $cfg) {
             if (! is_array($cfg)) {
                 continue;
             }
 
             $out[] = [
-                'id' => (string) $slug,
-                'name' => (string) ($cfg['name'] ?? $slug),
+                'key' => (string) $key,
+                'name' => (string) ($cfg['name'] ?? $key),
                 'provider' => (string) ($cfg['provider'] ?? ''),
                 'model_id' => (string) ($cfg['model_id'] ?? ''),
             ];
         }
 
         return $out;
+    }
+
+    /**
+     * @return array<int, array{id: string, name: string, provider: string, model_id: string}>
+     */
+    public function listModels(): array
+    {
+        $out = [];
+
+        $seen = [];
+        foreach ($this->configuredModels() as $m) {
+            $modelId = trim($m['model_id']);
+            if ($modelId === '') {
+                continue;
+            }
+            if (isset($seen[$modelId])) {
+                continue;
+            }
+            $seen[$modelId] = true;
+
+            // Public API identifier is always model_id (not internal config keys).
+            $out[] = [
+                'id' => $modelId,
+                'name' => $m['name'] !== '' ? $m['name'] : $modelId,
+                'provider' => $m['provider'],
+                'model_id' => $modelId,
+            ];
+        }
+
+        return $out;
+    }
+
+    public function labelFor(string $identifier): string
+    {
+        $cfg = $this->findModelConfig($identifier);
+        if (is_array($cfg)) {
+            $name = trim((string) ($cfg['name'] ?? ''));
+            $modelId = trim((string) ($cfg['model_id'] ?? ''));
+
+            return $name !== '' ? $name : ($modelId !== '' ? $modelId : $identifier);
+        }
+
+        return $identifier;
     }
 
     /**
@@ -722,9 +765,7 @@ class AIService
      */
     private function resolveProviderAndModel(string $slug): array
     {
-        $models = (array) config('referee_ai.models', []);
-        $cfg = $models[$slug] ?? null;
-
+        $cfg = $this->findModelConfig($slug);
         if (! is_array($cfg)) {
             throw InvalidModelException::forSlug($slug);
         }
@@ -737,5 +778,38 @@ class AIService
         }
 
         return [$provider, $model];
+    }
+
+    /**
+     * Find a model config entry for either an internal key (legacy) or a public model_id.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findModelConfig(string $identifier): ?array
+    {
+        $models = (array) config('referee_ai.models', []);
+
+        // 1) Exact key match (legacy sessions may store internal keys).
+        $direct = $models[$identifier] ?? null;
+        if (is_array($direct)) {
+            return $direct;
+        }
+
+        $id = trim($identifier);
+        if ($id === '') {
+            return null;
+        }
+
+        // 2) Match by model_id (preferred sessions store model_id).
+        foreach ($models as $cfg) {
+            if (! is_array($cfg)) {
+                continue;
+            }
+            if (trim((string) ($cfg['model_id'] ?? '')) === $id) {
+                return $cfg;
+            }
+        }
+
+        return null;
     }
 }
