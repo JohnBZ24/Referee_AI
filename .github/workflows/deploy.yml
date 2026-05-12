@@ -1,0 +1,62 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            echo "Going to app root"
+            cd /home/jhon/app
+
+            echo "Fetching latest master"
+            git fetch origin
+            git checkout master
+            git reset --hard origin/master
+
+            echo "Fixing Laravel cached package files"
+            cd /home/jhon/app/backend/backend
+            rm -f storage/framework/cache/services.php
+            rm -f storage/framework/cache/packages.php
+            rm -f bootstrap/cache/packages.php
+            rm -f bootstrap/cache/services.php
+
+            echo "Installing backend dependencies"
+            composer install --no-dev --optimize-autoloader --no-interaction
+
+            echo "Clearing Laravel cache"
+            php artisan optimize:clear
+            php artisan package:discover
+
+            echo "Running migrations"
+            php artisan migrate --force
+
+            echo "Caching Laravel production config"
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+
+            echo "Installing frontend dependencies"
+            cd /home/jhon/app/frontend
+            npm ci
+
+            echo "Building frontend"
+            npm run build
+
+            echo "Reloading PHP 8.4 FPM"
+            sudo /bin/systemctl reload php8.4-fpm
+
+            echo "Deployment finished successfully"
