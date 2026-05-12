@@ -127,7 +127,7 @@ export const sessionsAPI = {
 };
 
 export interface PromptResponse {
-  event: 'panelist_chunk' | 'panelist_complete' | 'panelist_error' | 'referee_start' | 'referee_chunk' | 'referee_complete' | 'done';
+  event: 'web_sources' | 'panelist_chunk' | 'panelist_complete' | 'panelist_error' | 'referee_start' | 'referee_chunk' | 'referee_complete' | 'done';
   data: any;
 }
 
@@ -144,6 +144,7 @@ export const promptAPI = {
     signal?: AbortSignal,
     attachments?: File[],
     refs?: HiddenContextRef[],
+    webSearchMode: 'auto' | 'on' | 'off' = 'auto',
   ): Promise<void> {
     const url = `${apiClient.defaults.baseURL}/sessions/${sessionId}/prompt`;
 
@@ -157,6 +158,9 @@ export const promptAPI = {
           if (roundId) {
             fd.append('round_id', roundId);
           }
+          if (webSearchMode) {
+            fd.append('web_search_mode', webSearchMode);
+          }
           if (refsPayload) {
             fd.append('context_json', JSON.stringify(refsPayload));
           }
@@ -168,6 +172,7 @@ export const promptAPI = {
       : JSON.stringify({
           prompt,
           round_id: roundId,
+          web_search_mode: webSearchMode,
           context_json: refsPayload ? JSON.stringify(refsPayload) : undefined,
         });
 
@@ -238,6 +243,7 @@ export const promptAPI = {
           const parsed = parseSseBlock(block);
           if (!parsed) continue;
           const validEvents = [
+            'web_sources',
             'panelist_chunk',
             'panelist_complete',
             'panelist_error',

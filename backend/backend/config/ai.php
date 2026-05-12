@@ -1,103 +1,149 @@
 <?php
 
 return [
-    'models' => [
-        'kimi-1' => [
-            'name' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
-            'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'kimi-2' => [
-            'name' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
-            'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'kimi-3' => [
-            'name' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
-            'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'kimi-4' => [
-            'name' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free').' (ref)',
-            'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free'),
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
 
-        // ── Extra OpenRouter models (non-free, generally cheap) ─────────────
-        // These appear in GET /api/v1/models so the frontend "Change Models"
-        // picker can offer more options.
-        'meta-llama/llama-3-8b-instruct' => [
-            'name' => 'Meta: Llama 3 8B Instruct',
-            'provider' => 'openrouter',
-            'model_id' => 'meta-llama/llama-3-8b-instruct',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'mistralai/mistral-7b-instruct-v0.1' => [
-            'name' => 'Mistral 7B Instruct v0.1',
-            'provider' => 'openrouter',
-            'model_id' => 'mistralai/mistral-7b-instruct-v0.1',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'qwen/qwen-2.5-7b-instruct' => [
-            'name' => 'Qwen 2.5 7B Instruct',
-            'provider' => 'openrouter',
-            'model_id' => 'qwen/qwen-2.5-7b-instruct',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'mistralai/mixtral-8x7b-instruct' => [
-            'name' => 'Mixtral 8x7B Instruct',
-            'provider' => 'openrouter',
-            'model_id' => 'mistralai/mixtral-8x7b-instruct',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'deepseek/deepseek-chat' => [
-            'name' => 'DeepSeek Chat',
-            'provider' => 'openrouter',
-            'model_id' => 'deepseek/deepseek-chat',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'deepseek/deepseek-r1' => [
-            'name' => 'DeepSeek R1',
-            'provider' => 'openrouter',
-            'model_id' => 'deepseek/deepseek-r1',
-            'api_key' => env('OPENROUTER_API_KEY'),
-        ],
-        'google/gemma-3-12b-it' => [
-            'name' => 'Gemma 3 12B IT',
-            'provider' => 'openrouter',
-            'model_id' => 'google/gemma-3-12b-it',
-            'api_key' => env('OPENROUTER_API_KEY'),
+    /*
+    |--------------------------------------------------------------------------
+    | Default AI Provider Names
+    |--------------------------------------------------------------------------
+    |
+    | Here you may specify which of the AI providers below should be the
+    | default for AI operations when no explicit provider is provided
+    | for the operation. This should be any provider defined below.
+    |
+    */
+
+    'default' => 'openrouter',
+    'default_for_images' => 'gemini',
+    'default_for_audio' => 'openai',
+    'default_for_transcription' => 'openai',
+    'default_for_embeddings' => 'openai',
+    'default_for_reranking' => 'cohere',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Caching
+    |--------------------------------------------------------------------------
+    |
+    | Below you may configure caching strategies for AI related operations
+    | such as embedding generation. You are free to adjust these values
+    | based on your application's available caching stores and needs.
+    |
+    */
+
+    'caching' => [
+        'embeddings' => [
+            'cache' => false,
+            'store' => env('CACHE_STORE', 'database'),
         ],
     ],
 
-    'default_panelists' => ['kimi-1', 'kimi-2', 'kimi-3'],
+    /*
+    |--------------------------------------------------------------------------
+    | AI Providers
+    |--------------------------------------------------------------------------
+    |
+    | Below are each of your AI providers defined for this application. Each
+    | represents an AI provider and API key combination which can be used
+    | to perform tasks like text, image, and audio creation via agents.
+    |
+    */
 
-    'default_referee' => 'kimi-4',
+    'providers' => [
+        'anthropic' => [
+            'driver' => 'anthropic',
+            'key' => env('ANTHROPIC_API_KEY'),
+            'url' => env('ANTHROPIC_URL', 'https://api.anthropic.com/v1'),
+        ],
 
-    // Model slug used to generate a short session title after the first prompt.
-    // Defaults to the referee model.
-    'title_model' => env('AI_TITLE_MODEL', null),
+        'azure' => [
+            'driver' => 'azure',
+            'key' => env('AZURE_OPENAI_API_KEY'),
+            'url' => env('AZURE_OPENAI_URL'),
+            'api_version' => env('AZURE_OPENAI_API_VERSION', '2025-04-01-preview'),
+            'deployment' => env('AZURE_OPENAI_DEPLOYMENT', 'gpt-4o'),
+            'embedding_deployment' => env('AZURE_OPENAI_EMBEDDING_DEPLOYMENT', 'text-embedding-3-small'),
+        ],
 
-    // OpenRouter PDF parser engine used when PDFs are attached.
-    // Options per OpenRouter docs: cloudflare-ai (free), mistral-ocr, native
-    'openrouter_pdf_engine' => env('OPENROUTER_PDF_ENGINE', 'cloudflare-ai'),
+        'bedrock' => [
+            'driver' => 'bedrock',
+            'region' => env('AWS_BEDROCK_REGION', 'us-east-1'),
+            'key' => env('AWS_BEARER_TOKEN_BEDROCK'),
+            'access_key_id' => env('AWS_ACCESS_KEY_ID'),
+            'secret_access_key' => env('AWS_SECRET_ACCESS_KEY'),
+            'session_token' => env('AWS_SESSION_TOKEN'),
+            'use_default_credential_provider' => env('AWS_USE_DEFAULT_CREDENTIALS', true),
+        ],
 
-    // Fallback engine used when OpenRouter returns "Failed to parse <file>.pdf".
-    // Set to null/empty to disable retry.
-    'openrouter_pdf_engine_fallback' => env('OPENROUTER_PDF_ENGINE_FALLBACK', 'mistral-ocr'),
+        'cohere' => [
+            'driver' => 'cohere',
+            'key' => env('COHERE_API_KEY'),
+            'url' => env('COHERE_URL', 'https://api.cohere.com/v2'),
+        ],
 
-    /** Seconds before an AI request times out */
-    'timeout' => (int) env('AI_TIMEOUT', 120),
+        'deepseek' => [
+            'driver' => 'deepseek',
+            'key' => env('DEEPSEEK_API_KEY'),
+            'url' => env('DEEPSEEK_URL', 'https://api.deepseek.com'),
+        ],
 
-    'api_keys' => [
-        'anthropic' => env('ANTHROPIC_API_KEY'),
-        'openai' => env('OPENAI_API_KEY'),
-        'google' => env('GOOGLE_AI_API_KEY'),
-        'moonshot' => env('MOONSHOT_API_KEY'),
-        'openrouter' => env('OPENROUTER_API_KEY'),
+        'eleven' => [
+            'driver' => 'eleven',
+            'key' => env('ELEVENLABS_API_KEY'),
+        ],
+
+        'gemini' => [
+            'driver' => 'gemini',
+            'key' => env('GEMINI_API_KEY'),
+        ],
+
+        'groq' => [
+            'driver' => 'groq',
+            'key' => env('GROQ_API_KEY'),
+            'url' => env('GROQ_URL', 'https://api.groq.com/openai/v1'),
+        ],
+
+        'jina' => [
+            'driver' => 'jina',
+            'key' => env('JINA_API_KEY'),
+            'url' => env('JINA_URL', 'https://api.jina.ai/v1'),
+        ],
+
+        'mistral' => [
+            'driver' => 'mistral',
+            'key' => env('MISTRAL_API_KEY'),
+            'url' => env('MISTRAL_URL', 'https://api.mistral.ai/v1'),
+        ],
+
+        'ollama' => [
+            'driver' => 'ollama',
+            'key' => env('OLLAMA_API_KEY', ''),
+            'url' => env('OLLAMA_URL', 'http://localhost:11434'),
+        ],
+
+        'openai' => [
+            'driver' => 'openai',
+            'key' => env('OPENAI_API_KEY'),
+            'url' => env('OPENAI_URL', 'https://api.openai.com/v1'),
+        ],
+
+        'openrouter' => [
+            'driver' => 'openrouter',
+            'key' => env('OPENROUTER_API_KEY'),
+            'url' => env('OPENROUTER_URL', 'https://openrouter.ai/api/v1'),
+        ],
+
+        'voyageai' => [
+            'driver' => 'voyageai',
+            'key' => env('VOYAGEAI_API_KEY'),
+            'url' => env('VOYAGEAI_URL', 'https://api.voyageai.com/v1'),
+        ],
+
+        'xai' => [
+            'driver' => 'xai',
+            'key' => env('XAI_API_KEY'),
+            'url' => env('XAI_URL', 'https://api.x.ai/v1'),
+        ],
     ],
+
 ];

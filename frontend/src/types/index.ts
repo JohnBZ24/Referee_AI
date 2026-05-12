@@ -45,7 +45,7 @@ export interface ChatLine {
 }
 
 export interface SSEEvent {
-  event: 'panelist_chunk' | 'panelist_complete' | 'panelist_error' | 'referee_start' | 'referee_chunk' | 'referee_complete' | 'done';
+  event: 'web_sources' | 'panelist_chunk' | 'panelist_complete' | 'panelist_error' | 'referee_start' | 'referee_chunk' | 'referee_complete' | 'done';
   data: any;
 }
 
@@ -65,4 +65,6 @@ export interface SessionRound {
   models: Record<string, RoundModelState>;
   verdictText: string;
   verdictReady: boolean;
+  webSources?: { title: string; url: string; snippet: string }[];
+  webAnswer?: string;
 }

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useEffect, useState } from 'react';
-import { ArrowUp, CircleStop, Paperclip, X, AtSign } from 'lucide-react';
+import { ArrowUp, CircleStop, Paperclip, X, AtSign, Globe } from 'lucide-react';
 import type { Session } from '../types';
 
 export type HiddenSessionMessageRef = {
@@ -7,13 +7,16 @@ export type HiddenSessionMessageRef = {
   sessionTitle: string;
 };
 
+export type WebSearchMode = 'auto' | 'on' | 'off';
+
 interface InputAreaProps {
   value: string;
   onChange: (val: string) => void;
-  onSend: (payload: { attachments: File[]; refs: HiddenSessionMessageRef[] }) => void;
+  onSend: (payload: { attachments: File[]; refs: HiddenSessionMessageRef[]; webSearchMode: WebSearchMode }) => void;
   onCancel?: () => void;
   disabled?: boolean;
   isStreaming?: boolean;
+  variant?: 'docked' | 'center';
   leftOffset?: number;
   disableTransition?: boolean;
   sessions?: Pick<Session, 'id' | 'title'>[];
@@ -27,6 +30,7 @@ export default function InputArea({
   onCancel,
   disabled = false,
   isStreaming = false,
+  variant = 'docked',
   leftOffset = 0,
   disableTransition = false,
   sessions = [],
@@ -36,6 +40,7 @@ export default function InputArea({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<File[]>([]);
   const [refs, setRefs] = useState<HiddenSessionMessageRef[]>([]);
+  const [webSearchMode, setWebSearchMode] = useState<WebSearchMode>('off');
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -69,7 +74,8 @@ export default function InputArea({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+    const cap = variant === 'center' ? 240 : 200;
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
   }
 
   // Reset height when value is cleared (after send)
@@ -82,11 +88,35 @@ export default function InputArea({
     if (value === '') {
       setAttachments([]);
       setRefs([]);
+      setWebSearchMode('off');
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     }
   }, [value]);
+
+  function toggleWebSearchMode() {
+    if (disabled) {
+      return;
+    }
+
+    setWebSearchMode((m) => {
+      if (m === 'on') {
+        return 'off';
+      }
+      return 'on';
+    });
+  }
+
+  const webSearchButtonTone =
+    webSearchMode === 'on'
+      ? 'border-[#0F6E56] bg-white text-[#0F6E56] hover:bg-[#F9F8F6]'
+      : webSearchMode === 'auto'
+        ? 'border-[#BDB7AC] bg-white text-[#2C2C2A] hover:bg-[#F9F8F6]'
+        : 'border-[#D3D1C8] bg-white text-[#2C2C2A] hover:bg-[#F9F8F6]';
+
+  const webSearchButtonPress =
+    'active:translate-y-[1px] active:shadow-inner focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0F6E56]/30';
 
   useEffect(() => {
     function onDocPointerDown(e: PointerEvent) {
@@ -111,6 +141,8 @@ export default function InputArea({
     document.addEventListener('pointerdown', onDocPointerDown);
     return () => document.removeEventListener('pointerdown', onDocPointerDown);
   }, [mentionOpen]);
+
+
 
   const filteredSessions = useMemo(() => {
     const q = mentionQuery.trim().toLowerCase();
@@ -221,21 +253,33 @@ export default function InputArea({
   }
 
   return (
-    <div
-      ref={rootRef}
-      className={`fixed bottom-0 right-0 z-20 border-t border-[#D3D1C8] bg-[#F5F3F0] p-4 ${
-        disableTransition ? '' : 'transition-[left] duration-300'
-      }`}
-      style={{ left: leftOffset }}
-    >
+    <>
+      <div
+        ref={rootRef}
+        className={(() => {
+          if (variant === 'center') {
+            return 'w-full';
+          }
+          return `fixed bottom-0 right-0 z-20 border-t border-[#D3D1C8] bg-[#F5F3F0] p-4 ${
+            disableTransition ? '' : 'transition-[left] duration-300'
+          }`;
+        })()}
+        style={variant === 'center' ? undefined : { left: leftOffset }}
+      >
+        <div
+          className={variant === 'center' ? 'mx-auto w-full max-w-[880px]' : ''}
+        >
+          {/* no header */}
+
+          <div className={variant === 'center' ? 'p-5' : ''}>
       {(refs.length > 0 || attachments.length > 0) && (
-        <div className="mb-3 grid grid-cols-[88px_1fr_40px] gap-3">
-          <div />
-          <div className="min-w-0 flex flex-wrap gap-2">
+        <div className={variant === 'center' ? 'mb-3 flex flex-wrap gap-2' : 'mb-3 grid grid-cols-[132px_1fr_40px] gap-3'}>
+          {variant !== 'center' && <div />}
+          <div className={variant === 'center' ? 'min-w-0 flex flex-wrap gap-2' : 'min-w-0 flex flex-wrap gap-2'}>
             {refs.map((r) => (
               <div
                 key={r.sessionId}
-                className="flex items-center gap-2 rounded-md border border-[#D3D1C8] bg-white px-2 py-1.5 text-xs text-[#2C2C2A]"
+                className="flex items-center gap-2 rounded-md border border-[#D3D1C8] bg-white/70 px-2 py-1.5 text-xs text-[#2C2C2A]"
                 title="Will include last message from this chat (hidden)"
               >
                 <span className="max-w-[220px] truncate">@ {r.sessionTitle}</span>
@@ -253,7 +297,7 @@ export default function InputArea({
             {attachments.map((f, idx) => (
               <div
                 key={`${f.name}-${f.size}-${idx}`}
-                className="flex items-center gap-2 rounded-md border border-[#D3D1C8] bg-white px-2 py-1.5 text-xs text-[#2C2C2A]"
+                className="flex items-center gap-2 rounded-md border border-[#D3D1C8] bg-white/70 px-2 py-1.5 text-xs text-[#2C2C2A]"
                 title={f.type || 'file'}
               >
                 <span className="max-w-[220px] truncate">{f.name}</span>
@@ -273,11 +317,18 @@ export default function InputArea({
             {refs.length >= 3 && <span className="self-center text-xs text-[#888780]">Max 3 refs</span>}
             {attachments.length >= 3 && <span className="self-center text-xs text-[#888780]">Max 3 files</span>}
           </div>
-          <div />
+          {variant !== 'center' && <div />}
         </div>
       )}
 
-      <div className="relative grid grid-cols-[88px_1fr_40px] items-end gap-3" style={{ alignItems: 'end' }}>
+        <div
+          className={
+            variant === 'center'
+              ? 'relative rounded-2xl border border-[#D3D1C8] bg-transparent px-3 py-3'
+              : 'relative grid grid-cols-[132px_1fr_40px] items-end gap-3'
+          }
+          style={variant === 'center' ? undefined : { alignItems: 'end' }}
+        >
         <input
           ref={fileInputRef}
           type="file"
@@ -290,32 +341,86 @@ export default function InputArea({
           }}
         />
 
-        <div className="flex w-[88px] items-end gap-2 self-end">
-          <button
-            type="button"
-            onClick={openMentionPickerWithoutTyping}
-            disabled={disabled || sessions.length === 0}
-            className="flex h-[44px] w-10 items-center justify-center rounded-md border border-[#D3D1C8] bg-white text-[#2C2C2A] transition-colors hover:bg-[#F9F8F6] disabled:opacity-40"
-            title="Reference another chat (@)"
-            aria-label="Reference another chat"
-          >
-            <AtSign size={18} />
-          </button>
+        {variant !== 'center' && (
+          <div className="flex w-[132px] items-end gap-2 self-end">
+            <button
+              type="button"
+              onClick={openMentionPickerWithoutTyping}
+              disabled={disabled || sessions.length === 0}
+              className="flex h-[44px] w-10 items-center justify-center rounded-md border border-[#D3D1C8] bg-white text-[#2C2C2A] transition-colors hover:bg-[#F9F8F6] disabled:opacity-40"
+              title="Reference another chat (@)"
+              aria-label="Reference another chat"
+            >
+              <AtSign size={18} />
+            </button>
 
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={disabled || attachments.length >= 3}
-            className="flex h-[44px] w-10 items-center justify-center rounded-md border border-[#D3D1C8] bg-white text-[#2C2C2A] transition-colors hover:bg-[#F9F8F6] disabled:opacity-40"
-            title="Attach files"
-          >
-            <Paperclip size={18} />
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled || attachments.length >= 3}
+              className="flex h-[44px] w-10 items-center justify-center rounded-md border border-[#D3D1C8] bg-white text-[#2C2C2A] transition-colors hover:bg-[#F9F8F6] disabled:opacity-40"
+              title="Attach files"
+            >
+              <Paperclip size={18} />
+            </button>
 
-        <div className="relative min-w-0 flex-1 self-end">
+            <button
+              type="button"
+              onClick={toggleWebSearchMode}
+              disabled={disabled}
+              aria-pressed={webSearchMode !== 'off'}
+              className={`flex h-[44px] w-10 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${webSearchButtonTone} ${webSearchButtonPress}`}
+              title={`Web search: ${webSearchMode.toUpperCase()}`}
+              aria-label="Toggle web search"
+            >
+              <Globe size={18} />
+            </button>
+          </div>
+        )}
+
+        <div className={variant === 'center' ? 'flex items-start gap-2' : 'relative min-w-0 flex-1 self-end'}>
+          {variant === 'center' && (
+            <button
+              type="button"
+              onClick={openMentionPickerWithoutTyping}
+              disabled={disabled || sessions.length === 0}
+              className="mt-[6px] flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-transparent text-[#2C2C2A] transition-colors hover:bg-white/60 disabled:opacity-40"
+              title="Reference another chat (@)"
+              aria-label="Reference another chat"
+            >
+              <AtSign size={18} />
+            </button>
+          )}
+
+          {variant === 'center' && (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled || attachments.length >= 3}
+              className="mt-[6px] flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-transparent text-[#2C2C2A] transition-colors hover:bg-white/60 disabled:opacity-40"
+              title="Attach files"
+              aria-label="Attach files"
+            >
+              <Paperclip size={18} />
+            </button>
+          )}
+
+          {variant === 'center' && (
+            <button
+              type="button"
+              onClick={toggleWebSearchMode}
+              disabled={disabled}
+              aria-pressed={webSearchMode !== 'off'}
+              className={`mt-[6px] flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border transition-colors disabled:opacity-40 ${webSearchButtonTone} ${webSearchButtonPress}`}
+              title={`Web search: ${webSearchMode.toUpperCase()}`}
+              aria-label="Toggle web search"
+            >
+              <Globe size={18} />
+            </button>
+          )}
+
           {mentionOpen && (
-            <div className="absolute bottom-[calc(100%+10px)] left-0 right-0 z-30 overflow-hidden rounded-md border border-[#D3D1C8] bg-white shadow-sm">
+            <div className="absolute bottom-[calc(100%+10px)] left-0 right-0 z-50 overflow-hidden rounded-md border border-[#D3D1C8] bg-white shadow-sm">
               <div className="flex items-center justify-between border-b border-[#EEEAE1] px-3 py-2">
                 <div className="flex items-center gap-2 text-xs font-semibold text-[#2C2C2A]">
                   <AtSign size={14} />
@@ -377,11 +482,23 @@ export default function InputArea({
           <textarea
             ref={textareaRef}
             rows={1}
-            className="block w-full resize-none rounded-md border border-[#D3D1C8] bg-white px-3 py-2.5 text-sm text-[#2C2C2A] placeholder-[#888780] outline-none focus:border-[#888780] disabled:opacity-40"
-            style={{ minHeight: '44px', maxHeight: '200px' }}
-            placeholder="Ask all models a question…"
+            className={
+              variant === 'center'
+                ? 'block w-full flex-1 resize-none bg-transparent px-1 py-2.5 text-sm leading-relaxed text-[#2C2C2A] placeholder-[#888780] outline-none disabled:opacity-40'
+                : 'block w-full resize-none rounded-xl border border-[#D3D1C8] bg-[#FAFAF8] px-4 py-3 text-sm text-[#2C2C2A] placeholder-[#888780] outline-none focus:border-[#888780] disabled:opacity-40'
+            }
+            style={{
+              minHeight: variant === 'center' ? '96px' : '44px',
+              maxHeight: variant === 'center' ? '240px' : '200px',
+            }}
+            placeholder={variant === 'center' ? 'Ask a question to get started…' : 'Ask all models a question…'}
             value={value}
             disabled={disabled}
+            onFocus={() => {
+              if (!disabled) {
+                // no-op
+              }
+            }}
           onChange={(e) => {
             const next = e.target.value;
             onChange(next);
@@ -469,12 +586,41 @@ export default function InputArea({
               if (isStreaming) {
                 return;
               }
-              onSend({ attachments, refs });
+              onSend({ attachments, refs, webSearchMode });
             }
           }}
           />
+
+          {variant === 'center' && (
+            <div className="flex flex-shrink-0 items-end">
+              {isStreaming ? (
+                <button
+                  type="button"
+                  onClick={() => onCancel?.()}
+                  disabled={!onCancel}
+                  className="mt-[6px] flex h-10 w-10 items-center justify-center rounded-lg bg-[#D85A30] text-white transition-colors hover:bg-[#C74F28] disabled:opacity-40"
+                  title="Cancel"
+                  aria-label="Cancel"
+                >
+                  <CircleStop size={18} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onSend({ attachments, refs, webSearchMode })}
+                  disabled={!value.trim() || disabled}
+                  className="mt-[6px] inline-flex h-10 items-center justify-center gap-2 rounded-lg bg-[#2C2C2A] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#404040] disabled:opacity-30"
+                  title="Send"
+                  aria-label="Send"
+                >
+                  Send
+                  <ArrowUp size={16} />
+                </button>
+              )}
+            </div>
+          )}
         </div>
-        {isStreaming ? (
+        {variant !== 'center' && (isStreaming ? (
           <button
             type="button"
             onClick={() => onCancel?.()}
@@ -487,21 +633,29 @@ export default function InputArea({
           </button>
         ) : (
           <button
-            onClick={() => onSend({ attachments, refs })}
+            onClick={() => {
+              onSend({ attachments, refs, webSearchMode });
+            }}
             disabled={!value.trim() || disabled}
             className="flex h-[44px] w-10 flex-shrink-0 items-center justify-center rounded-md bg-[#2C2C2A] text-white transition-colors hover:bg-[#404040] disabled:opacity-30 self-end"
             title="Send"
             aria-label="Send"
+            type="button"
           >
             <ArrowUp size={18} />
           </button>
-        )}
+        ))}
       </div>
-      <p className="mt-2 text-center text-xs text-[#888780]">
-        {isStreaming
-          ? 'Streaming… Click stop to cancel'
-          : 'Enter to send · Shift + Enter for new line · Up to 3 attachments (10MB each)'}
-      </p>
-    </div>
+      {variant !== 'center' && (
+        <p className="mt-2 text-center text-xs text-[#888780]">
+          {isStreaming
+            ? 'Streaming… Click stop to cancel'
+            : 'Enter to send · Shift + Enter for new line · Up to 3 attachments (10MB each)'}
+        </p>
+      )}
+          </div>
+        </div>
+      </div>
+    </>
   );
 }

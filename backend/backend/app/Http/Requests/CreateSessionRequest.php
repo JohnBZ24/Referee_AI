@@ -15,7 +15,7 @@ class CreateSessionRequest extends FormRequest
     /** @return array<string, ValidationRule|array<mixed>|string> */
     public function rules(): array
     {
-        $validSlugs = array_keys(config('ai.models', []));
+        $validSlugs = array_keys(config('referee_ai.models', []));
 
         return [
             'title' => ['sometimes', 'string', 'max:255'],

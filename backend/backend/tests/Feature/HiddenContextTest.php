@@ -3,41 +3,23 @@
 use App\Models\AiSession;
 use App\Models\Message;
 use App\Services\AI\AIService;
+use Tests\Support\FakeAIService;
 
 it('keeps referenced last message hidden from stored prompt but includes it in AI prompt', function () {
     $target = AiSession::factory()->create();
     $other = AiSession::factory()->create(['title' => 'Other Chat']);
 
-    $refMsg = Message::factory()->for($other, 'session')->user()->create([
+    Message::factory()->for($other, 'session')->user()->create([
         'content' => 'This is the last message from the other chat.',
         'status' => 'complete',
     ]);
 
-    $spy = new class extends AIService
-    {
-        public string $lastParallelPrompt = '';
+    Message::factory()->for($other, 'session')->referee()->create([
+        'content' => "Winner: kimi-2\nSummary: This is the verdict from the other chat.",
+        'status' => 'complete',
+    ]);
 
-        public function streamParallel(array $modelSlugs, string $prompt, callable $onChunk, callable $onComplete, ?callable $onError = null): array
-        {
-            $this->lastParallelPrompt = $prompt;
-
-            $responses = [];
-            foreach ($modelSlugs as $i => $slug) {
-                $onChunk($i, 'ok');
-                $onComplete($i, 0, 'ok');
-                $responses[$i] = 'ok';
-            }
-
-            return $responses;
-        }
-
-        public function streamSingle(string $modelSlug, string $prompt, callable $onChunk): string
-        {
-            $onChunk('ok');
-
-            return 'ok';
-        }
-    };
+    $spy = new FakeAIService;
 
     app()->instance(AIService::class, $spy);
 
@@ -63,5 +45,10 @@ it('keeps referenced last message hidden from stored prompt but includes it in A
 
     expect($spy->lastParallelPrompt)
         ->toContain('My visible question')
-        ->toContain('This is the last message from the other chat.');
+        ->toContain('Referenced verdict')
+        ->toContain('Winner: kimi-2')
+        ->toContain('This is the verdict from the other chat.');
+
+    expect($spy->lastParallelPrompt)
+        ->toContain('Full referee verdict');
 });

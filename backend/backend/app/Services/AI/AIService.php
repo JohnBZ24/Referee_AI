@@ -4,574 +4,738 @@ namespace App\Services\AI;
 
 use App\Exceptions\AIProviderException;
 use App\Exceptions\InvalidModelException;
-use App\Services\AI\Contracts\AIProvider;
-use App\Services\AI\Providers\AnthropicProvider;
-use App\Services\AI\Providers\GoogleProvider;
-use App\Services\AI\Providers\MoonshotProvider;
-use App\Services\AI\Providers\OpenAIProvider;
-use App\Services\AI\Providers\OpenRouterProvider;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Laravel\Ai\Files;
+use Laravel\Ai\Streaming\Events\TextDelta;
+use Symfony\Component\Process\Process;
+
+use function Laravel\Ai\agent;
 
 class AIService
 {
     /**
-     * Detect OpenRouter PDF parser failures so we can retry with a different engine.
-     */
-    protected function isOpenRouterPdfParseFailure(int $httpCode, string $detail): bool
-    {
-        if ($httpCode !== 400) {
-            return false;
-        }
-
-        return stripos($detail, 'Failed to parse') !== false;
-    }
-
-    /**
-     * @param  array<int, array<string, mixed>>|null  $plugins
-     * @return array<int, array<string, mixed>>|null
-     */
-    protected function rewriteOpenRouterPdfEngine(?array $plugins, string $engine): ?array
-    {
-        if (! is_array($plugins) || $plugins === []) {
-            return $plugins;
-        }
-
-        $next = [];
-        foreach ($plugins as $plugin) {
-            if (! is_array($plugin)) {
-                $next[] = $plugin;
-
-                continue;
-            }
-
-            $id = $plugin['id'] ?? null;
-            if ($id !== 'file-parser') {
-                $next[] = $plugin;
-
-                continue;
-            }
-
-            $pdf = $plugin['pdf'] ?? null;
-            if (! is_array($pdf)) {
-                $next[] = $plugin;
-
-                continue;
-            }
-
-            $pdf['engine'] = $engine;
-            $plugin['pdf'] = $pdf;
-            $next[] = $plugin;
-        }
-
-        return $next;
-    }
-
-    protected function openRouterPdfFallbackEngine(): ?string
-    {
-        $value = (string) config('ai.openrouter_pdf_engine_fallback', 'mistral-ocr');
-        $value = trim($value);
-
-        return $value !== '' ? $value : null;
-    }
-
-    /**
-     * Stream panelist models sequentially to avoid rate limiting.
-     *
-     * @param  array<string>  $modelSlugs  Keys from config('ai.models')
-     * @param  callable(int $index, string $chunk): void  $onChunk
-     * @param  callable(int $index, int $tokens, string $content): void  $onComplete
-     * @return array<int, string> Full responses indexed by position
-     */
-    public function streamParallel(
-        array $modelSlugs,
-        string $prompt,
-        callable $onChunk,
-        callable $onComplete,
-        ?callable $onError = null,
-    ): array {
-        $responses = [];
-
-        $multi = curl_multi_init();
-        $handles = [];
-        $metas = [];
-
-        foreach ($modelSlugs as $index => $slug) {
-            error_log("[AI Debug] Starting request {$index}: {$slug}");
-
-            $provider = $this->resolveProvider($slug);
-            $metas[$index] = [];
-            $responses[$index] = '';
-
-            $ch = $provider->buildStreamHandle(
-                $prompt,
-                function (string $chunk) use ($index, $onChunk, &$responses): void {
-                    $responses[$index] .= $chunk;
-                    $onChunk($index, $chunk);
-                },
-                $metas[$index],
-            );
-
-            $handles[$index] = $ch;
-            curl_multi_add_handle($multi, $ch);
-        }
-
-        $running = null;
-        do {
-            do {
-                $status = curl_multi_exec($multi, $running);
-            } while ($status === CURLM_CALL_MULTI_PERFORM);
-
-            if ($running) {
-                // Block until activity (or 1s) to avoid a tight loop.
-                curl_multi_select($multi, 1.0);
-            }
-        } while ($running && $status === CURLM_OK);
-
-        foreach ($handles as $index => $ch) {
-            $error = curl_error($ch);
-            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-            curl_multi_remove_handle($multi, $ch);
-            curl_close($ch);
-
-            if ($error || $httpCode >= 400) {
-                $raw = (string) ($metas[$index]['raw'] ?? '');
-                $rawSnippet = $raw !== '' ? substr($raw, -1000) : '';
-                error_log("[AI Debug] Request {$index} ({$modelSlugs[$index]}) FAILED - HTTP: {$httpCode}, Error: {$error}");
-                if ($rawSnippet !== '') {
-                    error_log("[AI Debug] Request {$index} raw (tail): {$rawSnippet}");
-                }
-                if (is_callable($onError)) {
-                    $detail = (string) $error;
-                    if ($detail === '' && $rawSnippet !== '') {
-                        $detail = $rawSnippet;
-                    }
-                    $onError($index, (int) $httpCode, $detail);
-                }
-
-                continue;
-            }
-
-            $onComplete($index, (int) ($metas[$index]['tokens'] ?? 0), $responses[$index]);
-            error_log("[AI Debug] Request {$index} ({$modelSlugs[$index]}) completed successfully");
-        }
-
-        curl_multi_close($multi);
-
-        return $responses;
-    }
-
-    /**
-     * Stream panelists in parallel using a pre-built messages payload (for attachments).
-     *
-     * @param  array<string>  $modelSlugs
-     * @param  array<int, array<string, mixed>>  $messages
-     * @param  array<int, array<string, mixed>>|null  $plugins
-     * @param  callable(int $index, string $chunk): void  $onChunk
-     * @param  callable(int $index, int $tokens, string $content): void  $onComplete
-     * @return array<int, string>
-     */
-    public function streamParallelMessages(
-        array $modelSlugs,
-        array $messages,
-        ?array $plugins,
-        callable $onChunk,
-        callable $onComplete,
-        ?callable $onError = null,
-    ): array {
-        $responses = [];
-
-        $multi = curl_multi_init();
-        $handles = [];
-        $metas = [];
-        $results = [];
-
-        foreach ($modelSlugs as $index => $slug) {
-            $provider = $this->resolveProvider($slug);
-            $metas[$index] = [];
-            $responses[$index] = '';
-
-            if (! method_exists($provider, 'buildStreamHandleFromPayload')) {
-                throw new AIProviderException("Provider does not support message payload streaming: {$slug}");
-            }
-
-            $payload = [
-                'model' => $provider->getModelId(),
-                'stream' => true,
-                'stream_options' => ['include_usage' => true],
-                'messages' => $messages,
-            ];
-            if (is_array($plugins) && $plugins !== []) {
-                $payload['plugins'] = $plugins;
-            }
-
-            /** @var callable $builder */
-            $builder = [$provider, 'buildStreamHandleFromPayload'];
-            $ch = $builder(
-                $payload,
-                function (string $chunk) use ($index, $onChunk, &$responses): void {
-                    $responses[$index] .= $chunk;
-                    $onChunk($index, $chunk);
-                },
-                $metas[$index],
-            );
-
-            $handles[$index] = $ch;
-            curl_multi_add_handle($multi, $ch);
-        }
-
-        $running = null;
-        do {
-            do {
-                $status = curl_multi_exec($multi, $running);
-            } while ($status === CURLM_CALL_MULTI_PERFORM);
-
-            if ($running) {
-                curl_multi_select($multi, 1.0);
-            }
-        } while ($running && $status === CURLM_OK);
-
-        foreach ($handles as $index => $ch) {
-            $error = (string) curl_error($ch);
-            $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-            curl_multi_remove_handle($multi, $ch);
-            curl_close($ch);
-
-            $raw = (string) ($metas[$index]['raw'] ?? '');
-            $rawSnippet = $raw !== '' ? substr($raw, -1500) : '';
-
-            $detail = $error;
-            if ($detail === '' && $rawSnippet !== '') {
-                $detail = $rawSnippet;
-            }
-
-            $results[$index] = [
-                'http' => $httpCode,
-                'error' => $error,
-                'detail' => $detail,
-            ];
-        }
-
-        curl_multi_close($multi);
-
-        $fallbackEngine = $this->openRouterPdfFallbackEngine();
-        $shouldRetry = [];
-
-        foreach ($modelSlugs as $index => $slug) {
-            $httpCode = (int) ($results[$index]['http'] ?? 0);
-            $error = (string) ($results[$index]['error'] ?? '');
-            $detail = (string) ($results[$index]['detail'] ?? '');
-
-            if ($error === '' && $httpCode < 400) {
-                $onComplete($index, (int) ($metas[$index]['tokens'] ?? 0), $responses[$index]);
-
-                continue;
-            }
-
-            if ($fallbackEngine !== null && $this->isOpenRouterPdfParseFailure($httpCode, $detail)) {
-                $shouldRetry[] = $index;
-
-                continue;
-            }
-
-            if (is_callable($onError)) {
-                $onError($index, $httpCode, $detail);
-            }
-        }
-
-        if ($shouldRetry === [] || $fallbackEngine === null) {
-            return $responses;
-        }
-
-        $retryPlugins = $this->rewriteOpenRouterPdfEngine($plugins, $fallbackEngine);
-
-        $retrySlugs = [];
-        foreach ($shouldRetry as $origIndex) {
-            $retrySlugs[$origIndex] = $modelSlugs[$origIndex];
-            $responses[$origIndex] = '';
-        }
-
-        $retryMulti = curl_multi_init();
-        $retryHandles = [];
-        $retryMetas = [];
-        $retryResults = [];
-
-        foreach ($retrySlugs as $origIndex => $slug) {
-            $provider = $this->resolveProvider($slug);
-            $retryMetas[$origIndex] = [];
-
-            if (! method_exists($provider, 'buildStreamHandleFromPayload')) {
-                throw new AIProviderException("Provider does not support message payload streaming: {$slug}");
-            }
-
-            $payload = [
-                'model' => $provider->getModelId(),
-                'stream' => true,
-                'stream_options' => ['include_usage' => true],
-                'messages' => $messages,
-            ];
-
-            if (is_array($retryPlugins) && $retryPlugins !== []) {
-                $payload['plugins'] = $retryPlugins;
-            }
-
-            /** @var callable $builder */
-            $builder = [$provider, 'buildStreamHandleFromPayload'];
-            $ch = $builder(
-                $payload,
-                function (string $chunk) use ($origIndex, $onChunk, &$responses): void {
-                    $responses[$origIndex] .= $chunk;
-                    $onChunk($origIndex, $chunk);
-                },
-                $retryMetas[$origIndex],
-            );
-
-            $retryHandles[$origIndex] = $ch;
-            curl_multi_add_handle($retryMulti, $ch);
-        }
-
-        $running = null;
-        do {
-            do {
-                $status = curl_multi_exec($retryMulti, $running);
-            } while ($status === CURLM_CALL_MULTI_PERFORM);
-
-            if ($running) {
-                curl_multi_select($retryMulti, 1.0);
-            }
-        } while ($running && $status === CURLM_OK);
-
-        foreach ($retryHandles as $origIndex => $ch) {
-            $error = (string) curl_error($ch);
-            $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-            curl_multi_remove_handle($retryMulti, $ch);
-            curl_close($ch);
-
-            $raw = (string) ($retryMetas[$origIndex]['raw'] ?? '');
-            $rawSnippet = $raw !== '' ? substr($raw, -1500) : '';
-
-            $detail = $error;
-            if ($detail === '' && $rawSnippet !== '') {
-                $detail = $rawSnippet;
-            }
-
-            $retryResults[$origIndex] = [
-                'http' => $httpCode,
-                'error' => $error,
-                'detail' => $detail,
-            ];
-        }
-
-        curl_multi_close($retryMulti);
-
-        foreach ($shouldRetry as $origIndex) {
-            $httpCode = (int) ($retryResults[$origIndex]['http'] ?? 0);
-            $error = (string) ($retryResults[$origIndex]['error'] ?? '');
-            $detail = (string) ($retryResults[$origIndex]['detail'] ?? '');
-
-            if ($error === '' && $httpCode < 400) {
-                $onComplete($origIndex, (int) ($retryMetas[$origIndex]['tokens'] ?? 0), $responses[$origIndex]);
-
-                continue;
-            }
-
-            if (is_callable($onError)) {
-                $onError($origIndex, $httpCode, $detail);
-            }
-        }
-
-        return $responses;
-    }
-
-    /**
-     * Stream a single model using a pre-built messages payload (for attachments).
-     *
-     * @param  array<int, array<string, mixed>>  $messages
-     * @param  array<int, array<string, mixed>>|null  $plugins
-     */
-    public function streamSingleMessages(string $modelSlug, array $messages, ?array $plugins, callable $onChunk): string
-    {
-        $provider = $this->resolveProvider($modelSlug);
-        $meta = [];
-        $fullResponse = '';
-
-        if (! method_exists($provider, 'buildStreamHandleFromPayload')) {
-            throw new AIProviderException("Provider does not support message payload streaming: {$modelSlug}");
-        }
-
-        $payload = [
-            'model' => $provider->getModelId(),
-            'stream' => true,
-            'stream_options' => ['include_usage' => true],
-            'messages' => $messages,
-        ];
-        if (is_array($plugins) && $plugins !== []) {
-            $payload['plugins'] = $plugins;
-        }
-
-        $attempt = function (array $payload, array &$meta) use ($provider, $onChunk, &$fullResponse): array {
-            $fullResponse = '';
-            $meta = [];
-
-            /** @var callable $builder */
-            $builder = [$provider, 'buildStreamHandleFromPayload'];
-            $ch = $builder(
-                $payload,
-                function (string $chunk) use ($onChunk, &$fullResponse): void {
-                    $fullResponse .= $chunk;
-                    $onChunk($chunk);
-                },
-                $meta,
-            );
-
-            curl_exec($ch);
-
-            $error = (string) curl_error($ch);
-            $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-
-            $raw = (string) ($meta['raw'] ?? '');
-            $rawSnippet = $raw !== '' ? substr($raw, -1500) : '';
-
-            $detail = $error;
-            if ($detail === '' && $rawSnippet !== '') {
-                $detail = $rawSnippet;
-            }
-
-            return [$httpCode, $error, $detail];
-        };
-
-        [$httpCode, $error, $detail] = $attempt($payload, $meta);
-
-        if ($error === '' && $httpCode < 400) {
-            return $fullResponse;
-        }
-
-        $fallbackEngine = $this->openRouterPdfFallbackEngine();
-        if ($fallbackEngine !== null && $this->isOpenRouterPdfParseFailure($httpCode, $detail)) {
-            $retryPlugins = $this->rewriteOpenRouterPdfEngine($plugins, $fallbackEngine);
-            $retryPayload = $payload;
-            if (is_array($retryPlugins) && $retryPlugins !== []) {
-                $retryPayload['plugins'] = $retryPlugins;
-            }
-
-            $retryMeta = [];
-            [$retryHttp, $retryError, $retryDetail] = $attempt($retryPayload, $retryMeta);
-
-            if ($retryError === '' && $retryHttp < 400) {
-                return $fullResponse;
-            }
-
-            throw new AIProviderException("Stream error for referee '{$modelSlug}': HTTP {$retryHttp} - {$retryDetail}");
-        }
-
-        throw new AIProviderException("Stream error for referee '{$modelSlug}': HTTP {$httpCode} - {$detail}");
-    }
-
-    /**
-     * Stream a single model (used for the referee) and return the full response.
-     *
-     * @param  callable(string $chunk): void  $onChunk
-     */
-    public function streamSingle(string $modelSlug, string $prompt, callable $onChunk): string
-    {
-        $provider = $this->resolveProvider($modelSlug);
-        $meta = [];
-        $fullResponse = '';
-
-        $ch = $provider->buildStreamHandle(
-            $prompt,
-            function (string $chunk) use ($onChunk, &$fullResponse): void {
-                $fullResponse .= $chunk;
-                $onChunk($chunk);
-            },
-            $meta,
-        );
-
-        curl_exec($ch);
-
-        $error = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($error || $httpCode >= 400) {
-            $raw = (string) ($meta['raw'] ?? '');
-            $rawSnippet = $raw !== '' ? substr($raw, -1500) : '';
-            $detail = (string) $error;
-            if ($detail === '' && $rawSnippet !== '') {
-                $detail = $rawSnippet;
-            }
-
-            throw new AIProviderException("Stream error for referee '{$modelSlug}': HTTP {$httpCode} - {$detail}");
-        }
-
-        return $fullResponse;
-    }
-
-    /**
-     * Return structured list of all configured models.
-     *
      * @return array<int, array{id: string, name: string, provider: string, model_id: string}>
      */
     public function listModels(): array
     {
-        return collect(config('ai.models', []))
-            ->map(fn (array $cfg, string $slug) => [
-                'id' => $slug,
-                'name' => $cfg['name'],
-                'provider' => $cfg['provider'],
-                'model_id' => $cfg['model_id'],
-            ])
-            ->values()
-            ->all();
-    }
+        $models = (array) config('referee_ai.models', []);
 
-    /** @throws InvalidModelException */
-    public function resolveProvider(string $slug): AIProvider
-    {
-        $legacyMap = [
-            'llama3-8b-instruct' => 'meta-llama/llama-3-8b-instruct',
-            'mistral-7b-instruct-v0.1' => 'mistralai/mistral-7b-instruct-v0.1',
-            'qwen-2.5-7b-instruct' => 'qwen/qwen-2.5-7b-instruct',
-            'mixtral-8x7b-instruct' => 'mistralai/mixtral-8x7b-instruct',
-            'deepseek-chat' => 'deepseek/deepseek-chat',
-            'deepseek-r1' => 'deepseek/deepseek-r1',
-            'gemma3-12b-it' => 'google/gemma-3-12b-it',
-        ];
-
-        if (isset($legacyMap[$slug])) {
-            $slug = $legacyMap[$slug];
-        }
-
-        $config = config("ai.models.{$slug}");
-
-        if (! $config) {
-            // Fallback: allow passing an OpenRouter model id directly (e.g. "deepseek/deepseek-r1").
-            // This prevents hard failures when config cache is stale or when users select
-            // models by id instead of internal slugs.
-            if (str_contains($slug, '/')) {
-                $apiKey = (string) config('ai.api_keys.openrouter', '');
-                if ($apiKey === '') {
-                    throw new InvalidModelException("Unknown model slug: {$slug}");
-                }
-
-                return new OpenRouterProvider($apiKey, $slug, $slug);
+        $out = [];
+        foreach ($models as $slug => $cfg) {
+            if (! is_array($cfg)) {
+                continue;
             }
 
-            throw new InvalidModelException("Unknown model slug: {$slug}");
+            $out[] = [
+                'id' => (string) $slug,
+                'name' => (string) ($cfg['name'] ?? $slug),
+                'provider' => (string) ($cfg['provider'] ?? ''),
+                'model_id' => (string) ($cfg['model_id'] ?? ''),
+            ];
         }
 
-        $apiKey = config("ai.models.{$slug}.api_key")
-            ?? config("ai.api_keys.{$config['provider']}");
+        return $out;
+    }
 
-        return match ($config['provider']) {
-            'anthropic' => new AnthropicProvider($apiKey, $config['model_id'], $config['name']),
-            'openai' => new OpenAIProvider($apiKey, $config['model_id'], $config['name']),
-            'google' => new GoogleProvider($apiKey, $config['model_id'], $config['name']),
-            'moonshot' => new MoonshotProvider($apiKey, $config['model_id'], $config['name']),
-            'openrouter' => new OpenRouterProvider($apiKey, $config['model_id'], $config['name']),
-            default => throw new InvalidModelException("Unsupported provider: {$config['provider']}"),
-        };
+    /**
+     * Stream panelists sequentially.
+     *
+     * @param  array<string>  $modelSlugs
+     * @param  array<int, UploadedFile>  $attachments
+     * @param  callable(int $index, string $chunk): void  $onChunk
+     * @param  callable(int $index, int $tokens, string $content): void  $onComplete
+     * @param  callable(int $index, int $httpCode, string $detail): void|null  $onError
+     * @return array<int, string>
+     */
+    public function streamPanelists(
+        array $modelSlugs,
+        string $prompt,
+        array $attachments,
+        callable $onChunk,
+        callable $onComplete,
+        ?callable $onError = null,
+    ): array {
+        return $this->streamPanelistsInParallel(
+            $modelSlugs,
+            $prompt,
+            $attachments,
+            $onChunk,
+            $onComplete,
+            $onError,
+        );
+    }
+
+    /**
+     * @param  array<string>  $modelSlugs
+     * @param  array<int, UploadedFile>  $attachments
+     * @param  callable(int $index, string $chunk): void  $onChunk
+     * @param  callable(int $index, int $tokens, string $content): void  $onComplete
+     * @param  callable(int $index, int $httpCode, string $detail): void|null  $onError
+     * @return array<int, string>
+     */
+    private function streamPanelistsInParallel(
+        array $modelSlugs,
+        string $prompt,
+        array $attachments,
+        callable $onChunk,
+        callable $onComplete,
+        ?callable $onError,
+    ): array {
+        // We stream multiple panelist models concurrently by launching a separate PHP process
+        // for each model (Artisan command `ai:stream`). Each worker prints JSON lines
+        // to stdout (delta/end/error), which we multiplex back into SSE events.
+        if (config('app.debug')) {
+            Log::debug('ai_panelists_parallel_start', [
+                'count' => count($modelSlugs),
+                'slugs' => array_values($modelSlugs),
+                'attachments' => count($attachments),
+            ]);
+        }
+
+        $tmpId = (string) Str::uuid();
+        $dir = storage_path('app/ai-stream/'.$tmpId);
+        File::ensureDirectoryExists($dir);
+
+        $promptFile = $dir.'/prompt.txt';
+        // Attachments are handled in two ways:
+        // - For some doc types we extract text and append it to the prompt (cheap + portable)
+        // - We also pass image/document files through to the provider via Laravel AI attachments
+        [$promptWithAttachmentText, $filesForWorkers] = $this->preparePromptAndWorkerAttachments($prompt, $attachments);
+        file_put_contents($promptFile, $promptWithAttachmentText);
+
+        $attachmentsFile = $dir.'/attachments.json';
+        $serialized = [];
+        foreach ($filesForWorkers as $i => $file) {
+            $name = (string) ($file['name'] ?? ('attachment-'.$i));
+            $mime = (string) ($file['mime'] ?? 'application/octet-stream');
+            $src = (string) ($file['path'] ?? '');
+            $kind = (string) ($file['kind'] ?? 'document');
+
+            if ($src === '' || ! is_file($src)) {
+                continue;
+            }
+
+            $safeName = preg_replace('/[^A-Za-z0-9._-]+/', '_', $name) ?: ('attachment-'.$i);
+            $dst = $dir.'/'.($i.'-'.$safeName);
+            File::copy($src, $dst);
+
+            $serialized[] = [
+                'path' => $dst,
+                'name' => $name,
+                'mime' => $mime,
+                'kind' => $kind,
+            ];
+        }
+        file_put_contents($attachmentsFile, json_encode($serialized));
+
+        $responses = [];
+        $buffers = [];
+        $done = [];
+
+        $processes = [];
+        foreach (array_values($modelSlugs) as $index => $slug) {
+            $responses[$index] = '';
+            $buffers[$index] = '';
+            $done[$index] = false;
+
+            try {
+                [$provider, $model] = $this->resolveProviderAndModel($slug);
+            } catch (\Throwable $e) {
+                $done[$index] = true;
+                if (is_callable($onError)) {
+                    $onError($index, 422, $e->getMessage());
+                }
+
+                continue;
+            }
+
+            $php = $this->phpCliBinary();
+            $artisan = base_path('artisan');
+
+            $proc = new Process([
+                $php,
+                $artisan,
+                'ai:stream',
+                $provider,
+                $model,
+                $promptFile,
+                $attachmentsFile,
+            ]);
+            $proc->setTimeout((int) config('referee_ai.timeout', 120) + 30);
+            $proc->setWorkingDirectory(base_path());
+            $proc->start();
+
+            if (config('app.debug')) {
+                Log::debug('ai_panelist_process_started', [
+                    'index' => $index,
+                    'slug' => $slug,
+                    'cmd' => $proc->getCommandLine(),
+                    'pid' => $proc->getPid(),
+                ]);
+            }
+            $processes[$index] = $proc;
+        }
+
+        while (true) {
+            $anyRunning = false;
+
+            foreach ($processes as $index => $proc) {
+                if (! $proc->isRunning()) {
+                    if (! $done[$index]) {
+                        // Consume any final output.
+                        $buffers[$index] .= $proc->getIncrementalOutput();
+                        $buffers[$index] .= $proc->getIncrementalErrorOutput();
+
+                        if (config('app.debug')) {
+                            Log::debug('ai_panelist_process_exited', [
+                                'index' => $index,
+                                'exit' => $proc->getExitCode(),
+                                'ok' => $proc->isSuccessful(),
+                                'out_len' => strlen($proc->getOutput()),
+                                'err_len' => strlen($proc->getErrorOutput()),
+                            ]);
+                        }
+
+                        $this->drainStreamLines(
+                            $index,
+                            $buffers,
+                            $responses,
+                            $done,
+                            $onChunk,
+                            $onComplete,
+                            $onError,
+                        );
+
+                        if (! $done[$index]) {
+                            $done[$index] = true;
+                            if (! $proc->isSuccessful() && is_callable($onError)) {
+                                $onError($index, 500, trim($proc->getErrorOutput()) ?: 'Stream failed');
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+
+                $anyRunning = true;
+                $buffers[$index] .= $proc->getIncrementalOutput();
+                $buffers[$index] .= $proc->getIncrementalErrorOutput();
+                $this->drainStreamLines(
+                    $index,
+                    $buffers,
+                    $responses,
+                    $done,
+                    $onChunk,
+                    $onComplete,
+                    $onError,
+                );
+            }
+
+            if (! $anyRunning) {
+                break;
+            }
+
+            usleep(10_000);
+        }
+
+        $this->deleteDir($dir);
+
+        return $responses;
+    }
+
+    private function phpCliBinary(): string
+    {
+        $bin = (string) PHP_BINARY;
+
+        if ($bin === '') {
+            return 'php';
+        }
+
+        $lower = strtolower($bin);
+
+        // In some environments PHP_BINARY points to php-cgi (FPM / CGI). Prefer the CLI binary.
+        if (str_ends_with($lower, 'php-cgi.exe')) {
+            $candidate = substr($bin, 0, -strlen('php-cgi.exe')).'php.exe';
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        if (str_ends_with($lower, 'php-cgi')) {
+            $candidate = substr($bin, 0, -strlen('php-cgi')).'php';
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return $bin;
+    }
+
+    /**
+     * @param  array<int, string>  $buffers
+     * @param  array<int, string>  $responses
+     * @param  array<int, bool>  $done
+     */
+    private function drainStreamLines(
+        int $index,
+        array &$buffers,
+        array &$responses,
+        array &$done,
+        callable $onChunk,
+        callable $onComplete,
+        ?callable $onError,
+    ): void {
+        while (true) {
+            $pos = strpos($buffers[$index], "\n");
+            if ($pos === false) {
+                return;
+            }
+
+            $line = trim(substr($buffers[$index], 0, $pos));
+            $buffers[$index] = substr($buffers[$index], $pos + 1);
+
+            if ($line === '') {
+                continue;
+            }
+
+            $decoded = json_decode($line, true);
+            if (! is_array($decoded)) {
+                continue;
+            }
+
+            $type = (string) ($decoded['type'] ?? '');
+            if ($type === 'delta') {
+                $delta = (string) ($decoded['delta'] ?? '');
+                if ($delta !== '' && ! $done[$index]) {
+                    $responses[$index] .= $delta;
+                    $onChunk($index, $delta);
+                }
+
+                continue;
+            }
+
+            if ($type === 'end' && ! $done[$index]) {
+                $tokens = (int) ($decoded['tokens'] ?? 0);
+                $done[$index] = true;
+                $onComplete($index, $tokens, $responses[$index]);
+
+                continue;
+            }
+
+            if ($type === 'error' && ! $done[$index]) {
+                $done[$index] = true;
+                if (is_callable($onError)) {
+                    $onError($index, (int) ($decoded['http_code'] ?? 500), (string) ($decoded['detail'] ?? 'Error'));
+                }
+            }
+        }
+    }
+
+    private function deleteDir(string $dir): void
+    {
+        if ($dir === '' || ! is_dir($dir)) {
+            return;
+        }
+
+        $items = @scandir($dir);
+        if (! is_array($items)) {
+            return;
+        }
+
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $path = $dir.'/'.$item;
+            if (is_dir($path)) {
+                $this->deleteDir($path);
+            } else {
+                @unlink($path);
+            }
+        }
+
+        @rmdir($dir);
+    }
+
+    /**
+     * @param  array<int, UploadedFile>  $attachments
+     * @return array{0: string, 1: array<int, array{path: string, name: string, mime: string, kind: string}>}
+     */
+    private function preparePromptAndWorkerAttachments(string $prompt, array $attachments): array
+    {
+        $maxFiles = (int) config('referee_ai.attachment_max_files', 3);
+        $maxChars = (int) config('referee_ai.attachment_max_chars', 30_000);
+
+        $filesForWorkers = [];
+        $textBlocks = [];
+
+        foreach (array_slice($attachments, 0, $maxFiles) as $i => $file) {
+            if (! $file instanceof UploadedFile) {
+                continue;
+            }
+
+            $name = (string) ($file->getClientOriginalName() ?: ('attachment-'.$i));
+            $mime = (string) ($file->getMimeType() ?: 'application/octet-stream');
+            $path = (string) ($file->getRealPath() ?: '');
+            if ($path === '' || ! is_file($path)) {
+                continue;
+            }
+
+            if (str_starts_with($mime, 'image/')) {
+                $filesForWorkers[] = ['path' => $path, 'name' => $name, 'mime' => $mime, 'kind' => 'image'];
+
+                continue;
+            }
+
+            $extracted = $this->extractAttachmentText($path, $mime);
+            if ($extracted !== '') {
+                $textBlocks[] = $this->formatAttachmentTextBlock($name, $mime, $extracted);
+
+                continue;
+            }
+
+            // Fallback: pass as a document to the provider (if supported).
+            $filesForWorkers[] = ['path' => $path, 'name' => $name, 'mime' => $mime, 'kind' => 'document'];
+        }
+
+        $suffix = '';
+        if (count($textBlocks) > 0) {
+            $combined = "\n\n---\nAttached files (extracted text)\n---\n\n".implode("\n\n", $textBlocks);
+            if (strlen($combined) > $maxChars) {
+                $combined = substr($combined, 0, $maxChars)."\n\n[Attachment text truncated]";
+            }
+            $suffix = $combined;
+        }
+
+        return [$prompt.$suffix, $filesForWorkers];
+    }
+
+    private function formatAttachmentTextBlock(string $name, string $mime, string $text): string
+    {
+        $text = $this->ensureUtf8($text);
+        $clean = trim(preg_replace('/\r\n?/', "\n", $text) ?? '');
+
+        return "File: {$name} ({$mime})\n\n".$clean;
+    }
+
+    private function extractAttachmentText(string $path, string $mime): string
+    {
+        if ($mime === 'application/pdf') {
+            return $this->extractPdfText($path);
+        }
+
+        if ($mime === 'application/msword') {
+            return $this->extractDocText($path);
+        }
+
+        if ($mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+            return $this->extractDocxText($path);
+        }
+
+        if ($mime === 'text/plain' || $mime === 'text/csv' || $mime === 'application/csv') {
+            $raw = @file_get_contents($path);
+
+            return is_string($raw) ? $this->ensureUtf8($raw) : '';
+        }
+
+        return '';
+    }
+
+    private function extractPdfText(string $path): string
+    {
+        // Best-effort: use pdftotext if available in PATH.
+        try {
+            $proc = new Process(['pdftotext', '-layout', '-enc', 'UTF-8', $path, '-']);
+            $proc->setTimeout(20);
+            $proc->run();
+            if ($proc->isSuccessful()) {
+                return $this->ensureUtf8((string) $proc->getOutput());
+            }
+        } catch (\Throwable) {
+            // ignore
+        }
+
+        return '';
+    }
+
+    private function extractDocxText(string $path): string
+    {
+        if (! class_exists(\ZipArchive::class)) {
+            return '';
+        }
+
+        $zip = new \ZipArchive;
+        if ($zip->open($path) !== true) {
+            return '';
+        }
+
+        $xml = $zip->getFromName('word/document.xml');
+        $zip->close();
+
+        if (! is_string($xml) || $xml === '') {
+            return '';
+        }
+
+        // Replace common Word run/paragraph boundaries with newlines/spaces, then strip tags.
+        $xml = str_replace(['</w:p>', '</w:tr>'], "\n", $xml);
+        $xml = str_replace(['</w:tab>', '</w:tc>'], "\t", $xml);
+        $text = strip_tags($xml);
+
+        // Collapse excessive whitespace.
+        $text = preg_replace("/[ \t]+/", ' ', $text) ?? $text;
+        $text = preg_replace("/\n{3,}/", "\n\n", $text) ?? $text;
+
+        return trim($this->ensureUtf8($text));
+    }
+
+    private function extractDocText(string $path): string
+    {
+        // Best-effort: use antiword if available in PATH.
+        try {
+            $proc = new Process(['antiword', $path]);
+            $proc->setTimeout(20);
+            $proc->run();
+            if ($proc->isSuccessful()) {
+                return $this->ensureUtf8((string) $proc->getOutput());
+            }
+        } catch (\Throwable) {
+            // ignore
+        }
+
+        // Windows fallback: if antiword is installed in WSL, use wsl.exe to run it.
+        if (PHP_OS_FAMILY === 'Windows') {
+            $text = $this->extractDocTextViaWsl($path);
+            if ($text !== '') {
+                return $text;
+            }
+        }
+
+        return '';
+    }
+
+    private function extractDocTextViaWsl(string $windowsPath): string
+    {
+        try {
+            $distro = (string) (config('referee_ai.wsl_distro') ?: '');
+
+            if (config('app.debug')) {
+                Log::debug('ai_attachment_doc_wsl_antiword_attempt', [
+                    'distro' => $distro !== '' ? $distro : null,
+                    'path' => $windowsPath,
+                ]);
+            }
+
+            $wslpathArgs = ['wsl.exe'];
+            if ($distro !== '') {
+                $wslpathArgs[] = '-d';
+                $wslpathArgs[] = $distro;
+            }
+            $wslpathArgs = array_merge($wslpathArgs, ['-e', 'wslpath', '-u', $windowsPath]);
+
+            $wslPathProc = new Process($wslpathArgs);
+            $wslPathProc->setTimeout(10);
+            $wslPathProc->run();
+            if (! $wslPathProc->isSuccessful()) {
+                return '';
+            }
+
+            $wslPath = trim((string) $wslPathProc->getOutput());
+            if ($wslPath === '') {
+                return '';
+            }
+
+            if (config('app.debug')) {
+                Log::debug('ai_attachment_doc_wsl_path_resolved', [
+                    'distro' => $distro !== '' ? $distro : null,
+                    'wsl_path' => $wslPath,
+                ]);
+            }
+
+            $antiwordArgs = ['wsl.exe'];
+            if ($distro !== '') {
+                $antiwordArgs[] = '-d';
+                $antiwordArgs[] = $distro;
+            }
+            $antiwordArgs = array_merge($antiwordArgs, ['-e', 'antiword', $wslPath]);
+
+            $proc = new Process($antiwordArgs);
+            $proc->setTimeout(20);
+            $proc->run();
+            if (! $proc->isSuccessful()) {
+                return '';
+            }
+
+            $out = (string) $proc->getOutput();
+            if (trim($out) === '') {
+                return '';
+            }
+
+            if (config('app.debug')) {
+                Log::debug('ai_attachment_doc_wsl_antiword_success', [
+                    'distro' => $distro !== '' ? $distro : null,
+                    'bytes' => strlen($out),
+                ]);
+            }
+
+            return $this->ensureUtf8($out);
+        } catch (\Throwable $e) {
+            if (config('app.debug')) {
+                Log::debug('ai_attachment_doc_wsl_antiword_failed', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
+
+            return '';
+        }
+    }
+
+    private function ensureUtf8(string $text): string
+    {
+        if ($text === '') {
+            return '';
+        }
+
+        // Remove NUL bytes which often break JSON encoding.
+        $text = str_replace("\0", '', $text);
+
+        // Fast path: already valid UTF-8.
+        if (@preg_match('//u', $text) === 1) {
+            return $text;
+        }
+
+        // Best-effort conversion. mbstring is preferred if available.
+        if (function_exists('mb_convert_encoding')) {
+            $converted = @mb_convert_encoding($text, 'UTF-8', 'UTF-8,Windows-1252,ISO-8859-1');
+            if (is_string($converted) && @preg_match('//u', $converted) === 1) {
+                return $converted;
+            }
+        }
+
+        if (function_exists('iconv')) {
+            $converted = @iconv('UTF-8', 'UTF-8//IGNORE', $text);
+            if (is_string($converted) && $converted !== '' && @preg_match('//u', $converted) === 1) {
+                return $converted;
+            }
+        }
+
+        // Last resort: drop non-ASCII bytes.
+        return (string) @preg_replace('/[^\x00-\x7F]/', '', $text);
+    }
+
+    /**
+     * Stream a single model.
+     *
+     * @param  array<int, UploadedFile>  $attachments
+     */
+    public function streamSingle(
+        string $modelSlug,
+        string $prompt,
+        array $attachments,
+        callable $onChunk,
+    ): string {
+        // Single-model streaming using the Laravel AI SDK.
+        [$provider, $model] = $this->resolveProviderAndModel($modelSlug);
+        $timeout = (int) config('referee_ai.timeout', 120);
+
+        [$promptWithAttachmentText, $files] = $this->preparePromptAndWorkerAttachments($prompt, $attachments);
+        $aiAttachments = $this->buildAiAttachments($files);
+
+        $events = [];
+        $text = '';
+        $stream = agent()->stream(
+            $promptWithAttachmentText,
+            provider: $provider,
+            model: $model,
+            attachments: $aiAttachments,
+            timeout: $timeout,
+        );
+
+        foreach ($stream as $event) {
+            $events[] = $event;
+            if ($event instanceof TextDelta) {
+                $text .= $event->delta;
+                $onChunk($event->delta);
+            }
+        }
+
+        return $text;
+    }
+
+    /**
+     * Prompt a model without streaming.
+     *
+     * @param  array<int, UploadedFile>  $attachments
+     */
+    public function complete(string $modelSlug, string $prompt, array $attachments = []): string
+    {
+        // Non-streaming call using the Laravel AI SDK (used for auto-titling sessions).
+        [$provider, $model] = $this->resolveProviderAndModel($modelSlug);
+        $timeout = (int) config('referee_ai.timeout', 120);
+
+        [$promptWithAttachmentText, $files] = $this->preparePromptAndWorkerAttachments($prompt, $attachments);
+        $aiAttachments = $this->buildAiAttachments($files);
+
+        $res = agent()->prompt(
+            $promptWithAttachmentText,
+            provider: $provider,
+            model: $model,
+            attachments: $aiAttachments,
+            timeout: $timeout,
+        );
+
+        return (string) $res;
+    }
+
+    /**
+     * @param  array<int, array{path: string, name: string, mime: string, kind: string}>  $files
+     * @return array<int, Files\Image|Files\Document>
+     */
+    private function buildAiAttachments(array $files): array
+    {
+        $out = [];
+        foreach ($files as $file) {
+            $path = (string) ($file['path'] ?? '');
+            if ($path === '' || ! is_file($path)) {
+                continue;
+            }
+
+            $kind = (string) ($file['kind'] ?? 'document');
+            $mime = (string) ($file['mime'] ?? '');
+
+            if ($kind === 'image' || str_starts_with($mime, 'image/')) {
+                $out[] = Files\Image::fromPath($path);
+
+                continue;
+            }
+
+            $out[] = Files\Document::fromPath($path);
+        }
+
+        return $out;
+    }
+
+    /**
+     * @return array{0: string, 1: string}
+     */
+    private function resolveProviderAndModel(string $slug): array
+    {
+        $models = (array) config('referee_ai.models', []);
+        $cfg = $models[$slug] ?? null;
+
+        if (! is_array($cfg)) {
+            throw InvalidModelException::forSlug($slug);
+        }
+
+        $provider = (string) ($cfg['provider'] ?? 'openai');
+        $model = (string) ($cfg['model_id'] ?? '');
+
+        if ($model === '') {
+            throw AIProviderException::forProvider($provider, "Missing model_id for slug '{$slug}'");
+        }
+
+        return [$provider, $model];
     }
 }

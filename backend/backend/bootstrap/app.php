@@ -19,6 +19,9 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    // Register class-based Artisan commands from app/Console/Commands.
+    // This keeps production commands out of routes/console.php closures.
+    ->withCommands()
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'can_access_session' => EnsureUserOwnsSession::class,

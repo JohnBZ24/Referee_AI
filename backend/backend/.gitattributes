@@ -1,11 +1,14 @@
-* text=auto eol=lf
+# Exclude non-production files from `git archive` exports.
+# This keeps repo history intact while producing a lean deploy artifact.
 
-*.blade.php diff=html
-*.css diff=css
-*.html diff=html
-*.md diff=markdown
-*.php diff=php
-
-/.github export-ignore
-CHANGELOG.md export-ignore
-.styleci.yml export-ignore
+/tests export-ignore
+/stubs export-ignore
+/storage/logs export-ignore
+/storage/framework/cache export-ignore
+/storage/framework/sessions export-ignore
+/storage/framework/testing export-ignore
+/storage/framework/views export-ignore
+/.env.example export-ignore
+/README.md export-ignore
+/CLAUDE.md export-ignore
+/AGENTS.md export-ignore

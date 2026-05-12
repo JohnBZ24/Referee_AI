@@ -7,7 +7,7 @@ import PromptDisplay from './components/PromptDisplay';
 import PanelGrid from './components/PanelGrid';
 import RefereeVerdict from './components/RefereeVerdict';
 import InputArea from './components/PromptInput';
-import type { HiddenSessionMessageRef } from './components/PromptInput';
+import type { HiddenSessionMessageRef, WebSearchMode } from './components/PromptInput';
 import { modelsAPI, sessionsAPI, promptAPI } from './lib/api';
 import type { Model, SSEEvent, Session, SessionRound } from './types';
 
@@ -29,6 +29,8 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
+
+  const [showDockedComposer, setShowDockedComposer] = useState(true);
 
   const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(() => {
     if (typeof window === 'undefined') {
@@ -95,6 +97,16 @@ export default function App() {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => {
+    const sid = currentSession?.id || '';
+    if (!sid) {
+      setShowDockedComposer(true);
+      return;
+    }
+    const roundsArr = sessionRounds[sid] || [];
+    setShowDockedComposer(roundsArr.length > 0);
+  }, [currentSession?.id, sessionRounds]);
 
   async function initializeApp() {
     try {
@@ -315,9 +327,10 @@ export default function App() {
     return model?.name || modelId;
   }
 
-  async function handleSend(payload: { attachments: File[]; refs: HiddenSessionMessageRef[] }) {
+  async function handleSend(payload: { attachments: File[]; refs: HiddenSessionMessageRef[]; webSearchMode: WebSearchMode }) {
     const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
     const refs = Array.isArray(payload.refs) ? payload.refs : [];
+    const webSearchMode = payload.webSearchMode || 'auto';
     const prompt = inputValue.trim();
 
     if (!prompt || !currentSession) {
@@ -335,6 +348,9 @@ export default function App() {
     const panelists = currentSession.model_set?.panelists || [];
 
     ensureSessionState(currentSession);
+
+    // If we're in the "empty session" centered composer state, dock the composer before streaming starts.
+    setShowDockedComposer(true);
 
     setInputValue('');
 
@@ -381,7 +397,8 @@ export default function App() {
         roundId,
         controller.signal,
         attachments,
-        refs.map((r) => ({ session_id: String(r.sessionId || '') })).filter((r) => r.session_id)
+        refs.map((r) => ({ session_id: String(r.sessionId || '') })).filter((r) => r.session_id),
+        webSearchMode,
       );
     } catch (error: any) {
       if (error.name === 'AbortError') {
@@ -473,6 +490,26 @@ export default function App() {
     }
 
     switch (event.event) {
+      case 'web_sources':
+        setSessionRounds((prev) => {
+          const rounds = [...(prev[sid] || [])];
+          const idx = rounds.findIndex((r) => r.id === roundId);
+          if (idx < 0) {
+            return prev;
+          }
+          const r = rounds[idx];
+          const sources = Array.isArray(event.data.sources) ? event.data.sources : [];
+          rounds[idx] = {
+            ...r,
+            webSources: sources.map((s: any) => ({
+              title: String(s?.title || ''),
+              url: String(s?.url || ''),
+              snippet: String(s?.snippet || ''),
+            })).filter((s: any) => s.url),
+          };
+          return { ...prev, [sid]: rounds };
+        });
+        break;
       case 'panelist_chunk':
         if (!roundId) {
           break;
@@ -654,6 +691,8 @@ export default function App() {
   const panelistIds = currentSession?.model_set?.panelists || [];
   const isStreaming = !!lastRound && lastRound.modelIds.some((id) => lastRound.models[id]?.status === 'streaming');
 
+  const isEmptySession = !!activeSessionId && rounds.length === 0 && !isStreaming;
+
   // Determine which sessions are actively streaming (for sidebar indicator)
   const streamingSessionIds = new Set<string>();
   for (const [sid, roundsArr] of Object.entries(sessionRounds)) {
@@ -779,12 +818,30 @@ export default function App() {
           onSave={handleModelChange}
         />
 
-        <div className="p-5 pb-[200px]">
+        <div className="relative p-5 pb-[200px]">
+          {isEmptySession && (
+            <div className="pointer-events-auto mx-auto flex min-h-[calc(100vh-220px)] max-w-[980px] items-center justify-center">
+              <div className="w-full">
+                <InputArea
+                  value={inputValue}
+                  onChange={setInputValue}
+                  onSend={handleSend}
+                  onCancel={handleCancelPrompt}
+                  disabled={isStreaming}
+                  isStreaming={isStreaming}
+                  variant="center"
+                  sessions={sessions.map((s) => ({ id: s.id, title: s.title }))}
+                  currentSessionId={currentSession?.id}
+                />
+              </div>
+            </div>
+          )}
+
           {rounds.map((r) => {
             const complete = r.modelIds.length > 0 && r.modelIds.every((id) => r.models[id]?.status === 'complete');
             return (
               <div key={r.id} className="mb-8">
-                <PromptDisplay prompt={r.prompt} refs={r.refs} />
+                <PromptDisplay prompt={r.prompt} refs={r.refs} webSources={r.webSources} webAnswer={r.webAnswer} />
                 <div className="mt-6">
                   <PanelGrid
                     modelIds={r.modelIds}
@@ -801,18 +858,24 @@ export default function App() {
         </div>
       </div>
 
-      <InputArea
-        value={inputValue}
-        onChange={setInputValue}
-        onSend={handleSend}
-        onCancel={handleCancelPrompt}
-        disabled={isStreaming}
-        isStreaming={isStreaming}
-        leftOffset={contentLeft}
-        disableTransition={sidebarResizing}
-        sessions={sessions.map((s) => ({ id: s.id, title: s.title }))}
-        currentSessionId={currentSession?.id}
-      />
+      <div
+        className={`transition-opacity duration-300 ${
+          showDockedComposer && !isEmptySession ? 'opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+      >
+        <InputArea
+          value={inputValue}
+          onChange={setInputValue}
+          onSend={handleSend}
+          onCancel={handleCancelPrompt}
+          disabled={isStreaming}
+          isStreaming={isStreaming}
+          leftOffset={contentLeft}
+          disableTransition={sidebarResizing}
+          sessions={sessions.map((s) => ({ id: s.id, title: s.title }))}
+          currentSessionId={currentSession?.id}
+        />
+      </div>
     </div>
   );
 }
