@@ -254,9 +254,25 @@ class AIService
 
                         if (! $done[$index]) {
                             $done[$index] = true;
-                            if (! $proc->isSuccessful() && is_callable($onError)) {
-                                $onError($index, 500, trim($proc->getErrorOutput()) ?: 'Stream failed');
-                            }
+                           if (! $proc->isSuccessful() && is_callable($onError)) {
+    Log::warning('ai_panelist_process_failed', [
+        'index' => $index,
+        'exit_code' => $proc->getExitCode(),
+        'cmd' => $proc->getCommandLine(),
+        'stdout' => $proc->getOutput(),
+        'stderr' => $proc->getErrorOutput(),
+        'prompt_file' => $promptFile,
+        'attachments_file' => $attachmentsFile,
+        'prompt_exists' => file_exists($promptFile),
+        'attachments_exists' => file_exists($attachmentsFile),
+        'prompt_readable' => is_readable($promptFile),
+        'attachments_readable' => is_readable($attachmentsFile),
+    ]);
+
+    $errorText = trim($proc->getErrorOutput() ?: $proc->getOutput());
+
+    $onError($index, 500, $errorText !== '' ? $errorText : 'Stream failed');
+}
                         }
                     }
 
