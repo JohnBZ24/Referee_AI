@@ -26,8 +26,12 @@ export default function ModelPicker({
     if (!isOpen) {
       return;
     }
-    setSelectedPanelists(currentPanelists);
-    setSelectedReferee(currentReferee);
+    const nextReferee = String(currentReferee || '').trim();
+    const nextPanelists = Array.from(new Set((currentPanelists || []).map((x) => String(x).trim()).filter(Boolean))).filter(
+      (id) => !nextReferee || id !== nextReferee,
+    );
+    setSelectedReferee(nextReferee);
+    setSelectedPanelists(nextPanelists);
   }, [isOpen, currentPanelists, currentReferee]);
 
   if (!isOpen) return null;

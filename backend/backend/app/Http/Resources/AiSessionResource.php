@@ -62,12 +62,17 @@ class AiSessionResource extends JsonResource
                 return str_starts_with($s, 'mistralai/') ? $fallbackPanelist : $s;
             }, $modelSet['panelists']));
             $modelSet['panelists'] = array_values(array_filter($modelSet['panelists'], fn ($x) => is_string($x) && trim($x) !== ''));
+            $modelSet['panelists'] = array_values(array_unique($modelSet['panelists']));
         }
 
         $referee = is_scalar($this->referee_model) ? trim((string) $this->referee_model) : '';
         $referee = $referee !== '' ? ($keyToId[$referee] ?? $referee) : '';
         if ($referee !== '' && str_starts_with($referee, 'mistralai/')) {
             $referee = $fallbackReferee;
+        }
+
+        if ($referee !== '' && isset($modelSet['panelists']) && is_array($modelSet['panelists'])) {
+            $modelSet['panelists'] = array_values(array_filter($modelSet['panelists'], fn ($x) => is_string($x) && $x !== $referee));
         }
 
         return [

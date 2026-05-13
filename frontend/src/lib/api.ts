@@ -39,14 +39,20 @@ function cleanSessionTitle(title: any): string {
 }
 
 function transformSession(apiSession: any): Session {
+  const rawPanelists = apiSession?.model_set?.panelists;
+  const referee = typeof apiSession?.referee_model === 'string' ? apiSession.referee_model.trim() : apiSession?.referee_model;
+  const panelists = Array.isArray(rawPanelists)
+    ? Array.from(new Set(rawPanelists.map((x) => String(x).trim()).filter(Boolean))).filter((id) => !referee || id !== referee)
+    : rawPanelists;
+
   return {
     id: String(apiSession.id || ''),
     title: cleanSessionTitle(apiSession.title),
     date: apiSession.created_at ? new Date(apiSession.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Apr 23',
     active: false, // Will be set by the app logic
 
-    model_set: apiSession.model_set,
-    referee_model: apiSession.referee_model,
+    model_set: apiSession.model_set ? { ...apiSession.model_set, panelists } : apiSession.model_set,
+    referee_model: referee,
     messages: Array.isArray(apiSession.messages) ? apiSession.messages.map(transformMessage) : undefined,
   };
 }
