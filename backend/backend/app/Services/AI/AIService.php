@@ -254,25 +254,25 @@ class AIService
 
                         if (! $done[$index]) {
                             $done[$index] = true;
-                           if (! $proc->isSuccessful() && is_callable($onError)) {
-    Log::warning('ai_panelist_process_failed', [
-        'index' => $index,
-        'exit_code' => $proc->getExitCode(),
-        'cmd' => $proc->getCommandLine(),
-        'stdout' => $proc->getOutput(),
-        'stderr' => $proc->getErrorOutput(),
-        'prompt_file' => $promptFile,
-        'attachments_file' => $attachmentsFile,
-        'prompt_exists' => file_exists($promptFile),
-        'attachments_exists' => file_exists($attachmentsFile),
-        'prompt_readable' => is_readable($promptFile),
-        'attachments_readable' => is_readable($attachmentsFile),
-    ]);
+                            if (! $proc->isSuccessful() && is_callable($onError)) {
+                                Log::warning('ai_panelist_process_failed', [
+                                    'index' => $index,
+                                    'exit_code' => $proc->getExitCode(),
+                                    'cmd' => $proc->getCommandLine(),
+                                    'stdout' => $proc->getOutput(),
+                                    'stderr' => $proc->getErrorOutput(),
+                                    'prompt_file' => $promptFile,
+                                    'attachments_file' => $attachmentsFile,
+                                    'prompt_exists' => file_exists($promptFile),
+                                    'attachments_exists' => file_exists($attachmentsFile),
+                                    'prompt_readable' => is_readable($promptFile),
+                                    'attachments_readable' => is_readable($attachmentsFile),
+                                ]);
 
-    $errorText = trim($proc->getErrorOutput() ?: $proc->getOutput());
+                                $errorText = trim($proc->getErrorOutput() ?: $proc->getOutput());
 
-    $onError($index, 500, $errorText !== '' ? $errorText : 'Stream failed');
-}
+                                $onError($index, 500, $errorText !== '' ? $errorText : 'Stream failed');
+                            }
                         }
                     }
 
@@ -314,6 +314,31 @@ class AIService
         }
 
         $lower = strtolower($bin);
+
+        // When running under FPM, PHP_BINARY can point at php-fpm (not the CLI binary).
+        // We launch subprocesses, so we need the CLI binary (php/php8.x), not php-fpm.
+        $base = strtolower(basename($lower));
+        if (str_starts_with($base, 'php-fpm')) {
+            // php-fpm8.4 -> php8.4, php-fpm -> php
+            $candidateBase = str_replace('php-fpm', 'php', basename($bin));
+            $candidate = dirname($bin).DIRECTORY_SEPARATOR.$candidateBase;
+            if (is_file($candidate)) {
+                return $candidate;
+            }
+
+            // Common Linux layout: php-fpm is in /usr/sbin while php is in /usr/bin.
+            $altDir = str_replace(DIRECTORY_SEPARATOR.'sbin', DIRECTORY_SEPARATOR.'bin', dirname($bin));
+            $altCandidate = $altDir.DIRECTORY_SEPARATOR.$candidateBase;
+            if ($altDir !== dirname($bin) && is_file($altCandidate)) {
+                return $altCandidate;
+            }
+
+            if (preg_match('/php-fpm(?P<ver>\d+\.\d+)$/i', $base, $m) === 1) {
+                return 'php'.$m['ver'];
+            }
+
+            return 'php';
+        }
 
         // In some environments PHP_BINARY points to php-cgi (FPM / CGI). Prefer the CLI binary.
         if (str_ends_with($lower, 'php-cgi.exe')) {
