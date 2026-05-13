@@ -8,13 +8,14 @@ export default defineConfig({
     proxy: {
       // Laravel API (and SSE streaming) during local dev.
       "/api": {
-        target: "http://localhost:8000",
+        // Use Herd site by default.
+        target: "http://backend.test",
         changeOrigin: true,
         secure: false,
       },
       // If Sanctum endpoints are ever re-enabled.
       "/sanctum": {
-        target: "http://localhost:8000",
+        target: "http://backend.test",
         changeOrigin: true,
         secure: false,
       },

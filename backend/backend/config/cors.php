@@ -19,7 +19,12 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => [env('FRONTEND_URL', 'http://localhost:5173')],
+    // Allow the frontend dev server (Vite) origins.
+    // In production, set FRONTEND_URL to your deployed frontend URL.
+    'allowed_origins' => array_values(array_unique(array_filter([
+        env('FRONTEND_URL', 'http://localhost:5173'),
+        'http://localhost:5174',
+    ]))),
 
     'allowed_origins_patterns' => [],
 

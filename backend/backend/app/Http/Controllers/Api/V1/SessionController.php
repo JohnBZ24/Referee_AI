@@ -23,7 +23,7 @@ class SessionController extends Controller
         return AiSessionResource::collection($sessions);
     }
 
-    public function store(CreateSessionRequest $request): AiSessionResource
+    public function store(CreateSessionRequest $request): JsonResponse
     {
         $defaultPanelists = (array) config('referee_ai.default_panelists', []);
         $defaultReferee = (string) config('referee_ai.default_referee', '');
@@ -43,6 +43,7 @@ class SessionController extends Controller
         }
 
         $session = AiSession::create([
+            'user_id' => $request->user()?->id,
             'title' => $request->input('title', 'New Session'),
             'model_set' => [
                 'panelists' => $panelists,
@@ -50,7 +51,9 @@ class SessionController extends Controller
             'referee_model' => $referee,
         ]);
 
-        return new AiSessionResource($session->load('messages'));
+        return (new AiSessionResource($session->load('messages')))
+            ->response()
+            ->setStatusCode(201);
     }
 
     public function show(AiSession $session): AiSessionResource
