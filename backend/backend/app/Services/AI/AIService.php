@@ -53,6 +53,12 @@ class AIService
             if ($modelId === '') {
                 continue;
             }
+
+            // Remove flaky / deprecated models from the public catalogue.
+            // Existing sessions can still reference them, but we don't surface them for selection.
+            if (str_starts_with($modelId, 'mistralai/')) {
+                continue;
+            }
             if (isset($seen[$modelId])) {
                 continue;
             }

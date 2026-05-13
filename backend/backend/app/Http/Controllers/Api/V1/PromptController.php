@@ -10,9 +10,11 @@ use App\Services\AI\AIService;
 use App\Services\WebSearch\BraveWebSearchService;
 use App\Services\WebSearch\SerperWebSearchService;
 use App\Services\WebSearch\TavilyWebSearchService;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Laravel\Ai\Exceptions\RateLimitedException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PromptController extends Controller
@@ -183,9 +185,11 @@ class PromptController extends Controller
                             'error' => $error,
                         ]);
 
-                        $public = $httpCode === 429
-                            ? "That model is rate-limited right now. Try again in a moment. (id: {$requestId})"
-                            : "That model failed to respond. Please try again. (id: {$requestId})";
+                        $public = match (true) {
+                            $httpCode === 429 => "That model is rate-limited right now. Try again in a moment. (id: {$requestId})",
+                            $httpCode === 404 => "That model is temporarily unavailable. Try a different model. (id: {$requestId})",
+                            default => "That model failed to respond. Please try again. (id: {$requestId})",
+                        };
 
                         $panelistMessages[$index]->update([
                             'content' => $public,
@@ -253,7 +257,22 @@ class PromptController extends Controller
                         'exception' => get_class($e),
                     ]);
 
-                    $content = "Referee failed to respond. Please try again. (id: {$requestId})";
+                    $httpCode = 500;
+                    $msg = $e->getMessage();
+
+                    if ($e instanceof RateLimitedException) {
+                        $httpCode = 429;
+                    } elseif ($e instanceof RequestException) {
+                        $httpCode = $e->response ? (int) $e->response->status() : 500;
+                    } elseif (preg_match('/status code\s+(\d{3})/i', $msg, $m) === 1) {
+                        $httpCode = (int) $m[1];
+                    }
+
+                    $content = match (true) {
+                        $httpCode === 429 => "Referee is rate-limited right now. Try again in a moment. (id: {$requestId})",
+                        $httpCode === 404 => "Referee model is temporarily unavailable. Try a different referee model. (id: {$requestId})",
+                        default => "Referee failed to respond. Please try again. (id: {$requestId})",
+                    };
 
                     $refereeMessage->update([
                         'content' => $content,

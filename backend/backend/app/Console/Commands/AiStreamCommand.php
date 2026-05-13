@@ -3,6 +3,8 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Http\Client\RequestException;
+use Laravel\Ai\Exceptions\RateLimitedException;
 use Laravel\Ai\Files;
 use Laravel\Ai\Streaming\Events\StreamEnd;
 use Laravel\Ai\Streaming\Events\TextDelta;
@@ -59,35 +61,79 @@ class AiStreamCommand extends Command
             }
         }
 
-        try {
-            $events = [];
-            $stream = agent()->stream(
-                $prompt,
-                provider: $provider,
-                model: $model,
-                attachments: $attachments,
-            );
+        $attempts = 0;
+        $maxAttempts = 3;
 
-            foreach ($stream as $event) {
-                $events[] = $event;
-                if ($event instanceof TextDelta) {
-                    $line = json_encode(['type' => 'delta', 'delta' => $event->delta], JSON_INVALID_UTF8_SUBSTITUTE);
-                    if (is_string($line)) {
-                        $this->output->writeln($line);
+        while (true) {
+            $events = [];
+            try {
+                $stream = agent()->stream(
+                    $prompt,
+                    provider: $provider,
+                    model: $model,
+                    attachments: $attachments,
+                );
+
+                foreach ($stream as $event) {
+                    $events[] = $event;
+                    if ($event instanceof TextDelta) {
+                        $line = json_encode(['type' => 'delta', 'delta' => $event->delta], JSON_INVALID_UTF8_SUBSTITUTE);
+                        if (is_string($line)) {
+                            $this->output->writeln($line);
+                        }
                     }
                 }
+
+                $usage = StreamEnd::combineUsage($events);
+                $this->output->writeln(json_encode(['type' => 'end', 'tokens' => $usage->completionTokens], JSON_INVALID_UTF8_SUBSTITUTE));
+
+                break;
+            } catch (RateLimitedException $e) {
+                $attempts++;
+                if ($attempts < $maxAttempts) {
+                    // Backoff: 250ms, 500ms...
+                    usleep(250_000 * $attempts);
+
+                    continue;
+                }
+
+                $this->output->writeln(json_encode([
+                    'type' => 'error',
+                    'http_code' => 429,
+                    'detail' => $e->getMessage(),
+                ], JSON_INVALID_UTF8_SUBSTITUTE));
+
+                return self::FAILURE;
+            } catch (RequestException $e) {
+                $status = $e->response ? (int) $e->response->status() : 500;
+
+                $this->output->writeln(json_encode([
+                    'type' => 'error',
+                    'http_code' => $status > 0 ? $status : 500,
+                    'detail' => $e->getMessage(),
+                ], JSON_INVALID_UTF8_SUBSTITUTE));
+
+                return self::FAILURE;
+            } catch (\Throwable $e) {
+                $msg = $e->getMessage();
+                $httpCode = 500;
+
+                if (preg_match('/status code\s+(\d{3})/i', $msg, $m) === 1) {
+                    $httpCode = (int) $m[1];
+                } elseif (str_contains(strtolower($msg), 'rate limit')) {
+                    $httpCode = 429;
+                } elseif (str_contains(strtolower($msg), 'connection refused')) {
+                    $httpCode = 503;
+                }
+
+                $this->output->writeln(json_encode([
+                    'type' => 'error',
+                    'http_code' => $httpCode,
+                    'detail' => $msg,
+                ], JSON_INVALID_UTF8_SUBSTITUTE));
+
+                return self::FAILURE;
             }
-
-            $usage = StreamEnd::combineUsage($events);
-            $this->output->writeln(json_encode(['type' => 'end', 'tokens' => $usage->completionTokens], JSON_INVALID_UTF8_SUBSTITUTE));
-        } catch (\Throwable $e) {
-            $this->output->writeln(json_encode([
-                'type' => 'error',
-                'http_code' => 500,
-                'detail' => $e->getMessage(),
-            ], JSON_INVALID_UTF8_SUBSTITUTE));
-
-            return self::FAILURE;
         }
 
         return self::SUCCESS;

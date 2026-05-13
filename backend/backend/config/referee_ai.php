@@ -5,24 +5,24 @@ return [
         // Default slots driven entirely by env model IDs.
         // Keys are internal only; the API returns model_id as the public identifier.
         'panelist_1' => [
-            'name' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
+            'name' => env('OPENROUTER_MODEL_1', 'meta-llama/llama-3-8b-instruct'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
+            'model_id' => env('OPENROUTER_MODEL_1', 'meta-llama/llama-3-8b-instruct'),
         ],
         'panelist_2' => [
-            'name' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
+            'name' => env('OPENROUTER_MODEL_2', 'qwen/qwen-2.5-7b-instruct'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
+            'model_id' => env('OPENROUTER_MODEL_2', 'qwen/qwen-2.5-7b-instruct'),
         ],
         'panelist_3' => [
-            'name' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
+            'name' => env('OPENROUTER_MODEL_3', 'deepseek/deepseek-chat'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
+            'model_id' => env('OPENROUTER_MODEL_3', 'deepseek/deepseek-chat'),
         ],
         'referee' => [
-            'name' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free').' (ref)',
+            'name' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini').' (ref)',
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
-            'model_id' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free'),
+            'model_id' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini'),
         ],
 
         // Extra OpenRouter models (non-free, generally cheap).
@@ -31,20 +31,15 @@ return [
             'provider' => 'openrouter',
             'model_id' => 'meta-llama/llama-3-8b-instruct',
         ],
-        'mistralai/mistral-7b-instruct-v0.1' => [
-            'name' => 'Mistral 7B Instruct v0.1',
-            'provider' => 'openrouter',
-            'model_id' => 'mistralai/mistral-7b-instruct-v0.1',
-        ],
         'qwen/qwen-2.5-7b-instruct' => [
             'name' => 'Qwen 2.5 7B Instruct',
             'provider' => 'openrouter',
             'model_id' => 'qwen/qwen-2.5-7b-instruct',
         ],
-        'mistralai/mixtral-8x7b-instruct' => [
-            'name' => 'Mixtral 8x7B Instruct',
+        'openai/gpt-4o-mini' => [
+            'name' => 'OpenAI: GPT-4o mini',
             'provider' => 'openrouter',
-            'model_id' => 'mistralai/mixtral-8x7b-instruct',
+            'model_id' => 'openai/gpt-4o-mini',
         ],
         'deepseek/deepseek-chat' => [
             'name' => 'DeepSeek Chat',
@@ -65,11 +60,11 @@ return [
 
     // Defaults stored on sessions as model_id values (not internal keys).
     'default_panelists' => [
-        env('OPENROUTER_MODEL_1', 'openai/gpt-oss-20b:free'),
-        env('OPENROUTER_MODEL_2', 'google/gemma-3-4b-it:free'),
-        env('OPENROUTER_MODEL_3', 'meta-llama/llama-3.2-3b-instruct:free'),
+        env('OPENROUTER_MODEL_1', 'meta-llama/llama-3-8b-instruct'),
+        env('OPENROUTER_MODEL_2', 'qwen/qwen-2.5-7b-instruct'),
+        env('OPENROUTER_MODEL_3', 'deepseek/deepseek-chat'),
     ],
-    'default_referee' => env('OPENROUTER_MODEL_4', 'qwen/qwen3-next-80b-a3b-instruct:free'),
+    'default_referee' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini'),
 
     'title_model' => env('AI_TITLE_MODEL', null),
 
