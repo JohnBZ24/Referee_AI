@@ -66,6 +66,8 @@ jobs:
 
             echo "Installing frontend dependencies"
             cd /home/jhon/app/frontend
+            echo "Removing previous node_modules (if any)"
+            rm -rf node_modules
             npm ci
 
             echo "Building frontend"
