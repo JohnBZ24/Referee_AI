@@ -39,6 +39,9 @@ class AiSessionResource extends JsonResource
     {
         [$keyToId] = $this->modelIdMaps();
 
+        $fallbackPanelist = (string) config('referee_ai.default_panelists.0', 'meta-llama/llama-3-8b-instruct');
+        $fallbackReferee = (string) config('referee_ai.default_referee', 'openai/gpt-4o-mini');
+
         $modelSet = is_array($this->model_set) ? $this->model_set : [];
         $panelists = $modelSet['panelists'] ?? null;
         if (is_array($panelists)) {
@@ -50,11 +53,22 @@ class AiSessionResource extends JsonResource
 
                 return $keyToId[$s] ?? $s;
             }, $panelists));
+            $modelSet['panelists'] = array_values(array_map(function ($id) use ($fallbackPanelist) {
+                $s = is_string($id) ? trim($id) : '';
+                if ($s === '') {
+                    return '';
+                }
+
+                return str_starts_with($s, 'mistralai/') ? $fallbackPanelist : $s;
+            }, $modelSet['panelists']));
             $modelSet['panelists'] = array_values(array_filter($modelSet['panelists'], fn ($x) => is_string($x) && trim($x) !== ''));
         }
 
         $referee = is_scalar($this->referee_model) ? trim((string) $this->referee_model) : '';
         $referee = $referee !== '' ? ($keyToId[$referee] ?? $referee) : '';
+        if ($referee !== '' && str_starts_with($referee, 'mistralai/')) {
+            $referee = $fallbackReferee;
+        }
 
         return [
             'id' => $this->id,

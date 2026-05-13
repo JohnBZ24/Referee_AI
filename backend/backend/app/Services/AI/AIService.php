@@ -16,6 +16,17 @@ use function Laravel\Ai\agent;
 
 class AIService
 {
+    /** @return array<string, string> */
+    private function modelAliases(): array
+    {
+        return [
+            // Retire Mistral routes that frequently 404 / rate-limit in our app.
+            // We map them to stable alternatives so existing sessions don't break.
+            'mistralai/mistral-7b-instruct-v0.1' => 'qwen/qwen-2.5-7b-instruct',
+            'mistralai/mixtral-8x7b-instruct' => 'qwen/qwen-2.5-7b-instruct',
+        ];
+    }
+
     /**
      * @return array<int, array{key: string, name: string, provider: string, model_id: string}>
      */
@@ -835,6 +846,11 @@ class AIService
     private function findModelConfig(string $identifier): ?array
     {
         $models = (array) config('referee_ai.models', []);
+
+        $id = trim($identifier);
+        if ($id !== '' && isset($this->modelAliases()[$id])) {
+            $identifier = $this->modelAliases()[$id];
+        }
 
         // 1) Exact key match (legacy sessions may store internal keys).
         $direct = $models[$identifier] ?? null;

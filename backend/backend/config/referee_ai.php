@@ -41,6 +41,36 @@ return [
             'provider' => 'openrouter',
             'model_id' => 'openai/gpt-4o-mini',
         ],
+
+        'openai/gpt-4.1-mini' => [
+            'name' => 'OpenAI: GPT-4.1 mini',
+            'provider' => 'openrouter',
+            'model_id' => 'openai/gpt-4.1-mini',
+        ],
+
+        'openai/gpt-4.1' => [
+            'name' => 'OpenAI: GPT-4.1',
+            'provider' => 'openrouter',
+            'model_id' => 'openai/gpt-4.1',
+        ],
+
+        'anthropic/claude-3.5-sonnet' => [
+            'name' => 'Anthropic: Claude 3.5 Sonnet',
+            'provider' => 'openrouter',
+            'model_id' => 'anthropic/claude-3.5-sonnet',
+        ],
+
+        'google/gemini-2.0-flash' => [
+            'name' => 'Google: Gemini 2.0 Flash',
+            'provider' => 'openrouter',
+            'model_id' => 'google/gemini-2.0-flash',
+        ],
+
+        'google/gemini-2.5-flash' => [
+            'name' => 'Google: Gemini 2.5 Flash',
+            'provider' => 'openrouter',
+            'model_id' => 'google/gemini-2.5-flash',
+        ],
         'deepseek/deepseek-chat' => [
             'name' => 'DeepSeek Chat',
             'provider' => 'openrouter',
