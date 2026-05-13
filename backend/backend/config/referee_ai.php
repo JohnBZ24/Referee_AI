@@ -20,7 +20,7 @@ return [
             'model_id' => env('OPENROUTER_MODEL_3', 'deepseek/deepseek-chat'),
         ],
         'referee' => [
-            'name' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini').' (ref)',
+            'name' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini'),
             'provider' => env('KIMI_PROVIDER', 'openrouter'),
             'model_id' => env('OPENROUTER_MODEL_4', 'openai/gpt-4o-mini'),
         ],

@@ -33,6 +33,10 @@ export default function ModelPicker({
   if (!isOpen) return null;
 
   const togglePanelist = (modelId: string) => {
+    // Prevent selecting the same model as both panelist and referee.
+    if (modelId === selectedReferee) {
+      return;
+    }
     setSelectedPanelists((prev) => {
       if (prev.includes(modelId)) {
         return prev.filter((id) => id !== modelId);
@@ -43,8 +47,10 @@ export default function ModelPicker({
   };
 
   const handleSave = () => {
-    if (selectedPanelists.length < 1) return;
-    onSave(selectedPanelists, selectedReferee);
+    const panelists = Array.from(new Set(selectedPanelists.map((x) => String(x).trim()).filter(Boolean)))
+      .filter((id) => id !== selectedReferee);
+    if (panelists.length < 1) return;
+    onSave(panelists, selectedReferee);
     onClose();
   };
 
@@ -111,7 +117,10 @@ export default function ModelPicker({
               return (
                 <button
                   key={model.id}
-                  onClick={() => setSelectedReferee(model.id)}
+                  onClick={() => {
+                    setSelectedReferee(model.id);
+                    setSelectedPanelists((prev) => prev.filter((id) => id !== model.id));
+                  }}
                   className={`flex items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors ${
                     isSelected
                       ? 'border-[#A8851F] bg-[#FDF8E8]'

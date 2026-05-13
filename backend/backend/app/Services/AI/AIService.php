@@ -70,6 +70,12 @@ class AIService
             if (str_starts_with($modelId, 'mistralai/')) {
                 continue;
             }
+
+            // Prefer a "clean" display name if multiple entries map to the same model_id.
+            $name = trim((string) ($m['name'] ?? ''));
+            if ($name === '' || str_contains($name, '(ref)')) {
+                $name = $modelId;
+            }
             if (isset($seen[$modelId])) {
                 continue;
             }
@@ -78,7 +84,7 @@ class AIService
             // Public API identifier is always model_id (not internal config keys).
             $out[] = [
                 'id' => $modelId,
-                'name' => $m['name'] !== '' ? $m['name'] : $modelId,
+                'name' => $name,
                 'provider' => $m['provider'],
                 'model_id' => $modelId,
             ];

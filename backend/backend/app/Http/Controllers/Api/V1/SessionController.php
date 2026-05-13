@@ -33,6 +33,8 @@ class SessionController extends Controller
             $panelists = $defaultPanelists;
         }
 
+        $panelists = array_values(array_unique(array_values(array_filter(array_map(fn ($x) => is_scalar($x) ? trim((string) $x) : '', $panelists), fn ($x) => is_string($x) && $x !== ''))));
+
         $referee = $request->input('referee_model');
         if (! is_string($referee) || trim($referee) === '') {
             $referee = $request->input('model_set.referee', $defaultReferee);
@@ -40,6 +42,10 @@ class SessionController extends Controller
         $referee = is_string($referee) ? trim($referee) : '';
         if ($referee === '') {
             $referee = $defaultReferee;
+        }
+
+        if ($referee !== '') {
+            $panelists = array_values(array_filter($panelists, fn ($x) => $x !== $referee));
         }
 
         $session = AiSession::create([
@@ -73,13 +79,29 @@ class SessionController extends Controller
             $modelSet = $session->model_set ?? [];
             $newPanelists = $request->input('model_set.panelists');
             if ($newPanelists !== null) {
-                $modelSet['panelists'] = $newPanelists;
+                $panelists = is_array($newPanelists) ? $newPanelists : [];
+                $panelists = array_values(array_unique(array_values(array_filter(array_map(fn ($x) => is_scalar($x) ? trim((string) $x) : '', $panelists), fn ($x) => is_string($x) && $x !== ''))));
+                $ref = $request->has('referee_model') ? trim((string) $request->input('referee_model')) : trim((string) ($session->referee_model ?? ''));
+                if ($ref !== '') {
+                    $panelists = array_values(array_filter($panelists, fn ($x) => $x !== $ref));
+                }
+                $modelSet['panelists'] = $panelists;
             }
             $data['model_set'] = $modelSet;
         }
 
         if ($request->has('referee_model')) {
-            $data['referee_model'] = $request->input('referee_model');
+            $ref = trim((string) $request->input('referee_model'));
+            $data['referee_model'] = $ref;
+
+            if (isset($data['model_set']) && is_array($data['model_set'])) {
+                $ms = $data['model_set'];
+                $p = $ms['panelists'] ?? null;
+                if (is_array($p) && $ref !== '') {
+                    $ms['panelists'] = array_values(array_filter($p, fn ($x) => $x !== $ref));
+                    $data['model_set'] = $ms;
+                }
+            }
         }
 
         if (! empty($data)) {
