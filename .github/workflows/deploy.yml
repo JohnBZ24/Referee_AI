@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: SSH and deploy
@@ -17,15 +18,22 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            set -e
+            set -euo pipefail
 
             echo "Going to app root"
             cd /home/jhon/app
+
+            echo "Sanity checks"
+            command -v git
+            command -v php
+            command -v composer
+            command -v npm
 
             echo "Fetching latest master"
             git fetch origin
             git checkout master
             git reset --hard origin/master
+            git clean -fd
 
             echo "Fixing Laravel cached package files"
             cd /home/jhon/app/backend/backend
@@ -57,6 +65,6 @@ jobs:
             npm run build
 
             echo "Reloading PHP 8.4 FPM"
-            sudo /bin/systemctl reload php8.4-fpm
+            sudo -n /bin/systemctl reload php8.4-fpm
 
             echo "Deployment finished successfully"
