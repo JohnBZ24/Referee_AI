@@ -5,6 +5,10 @@ on:
     branches: [master]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -28,6 +32,9 @@ jobs:
             command -v php
             command -v composer
             command -v npm
+            php -v
+            composer -V
+            npm -v
 
             echo "Fetching latest master"
             git fetch origin
@@ -66,5 +73,8 @@ jobs:
 
             echo "Reloading PHP 8.4 FPM"
             sudo -n /bin/systemctl reload php8.4-fpm
+
+            echo "Reloading nginx"
+            sudo -n /bin/systemctl reload nginx
 
             echo "Deployment finished successfully"
